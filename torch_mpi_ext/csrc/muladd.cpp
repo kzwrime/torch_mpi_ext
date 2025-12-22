@@ -24,7 +24,7 @@ extern "C" {
   }
 }
 
-namespace extension_cpp {
+namespace torch_mpi_ext {
 
 at::Tensor mymuladd_cpu(const at::Tensor& a, const at::Tensor& b, double c) {
   TORCH_CHECK(a.sizes() == b.sizes());
@@ -84,14 +84,14 @@ void myadd_out_cpu(const at::Tensor& a, const at::Tensor& b, at::Tensor& out) {
 }
 
 // Defines the operators
-TORCH_LIBRARY(extension_cpp, m) {
+TORCH_LIBRARY(torch_mpi_ext, m) {
   m.def("mymuladd(Tensor a, Tensor b, float c) -> Tensor");
   m.def("mymul(Tensor a, Tensor b) -> Tensor");
   m.def("myadd_out(Tensor a, Tensor b, Tensor(a!) out) -> ()");
 }
 
 // Registers CPU implementations for mymuladd, mymul, myadd_out
-TORCH_LIBRARY_IMPL(extension_cpp, CPU, m) {
+TORCH_LIBRARY_IMPL(torch_mpi_ext, CPU, m) {
   m.impl("mymuladd", &mymuladd_cpu);
   m.impl("mymul", &mymul_cpu);
   m.impl("myadd_out", &myadd_out_cpu);

@@ -16,7 +16,7 @@ from torch.utils.cpp_extension import (
     CUDA_HOME,
 )
 
-library_name = "extension_cpp"
+library_name = "torch_mpi_ext"
 
 if torch.__version__ >= "2.6.0":
     py_limited_api = True
