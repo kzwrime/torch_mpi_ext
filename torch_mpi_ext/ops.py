@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-__all__ = ["mymuladd", "myadd_out"]
+__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_reduce_", "all_gather"]
 
 
 def mymuladd(a: Tensor, b: Tensor, c: float) -> Tensor:
@@ -61,3 +61,62 @@ def _(a, b):
 def myadd_out(a: Tensor, b: Tensor, out: Tensor) -> None:
     """Writes a + b into out"""
     torch.ops.torch_mpi_ext.myadd_out.default(a, b, out)
+
+
+def all_reduce_(input: Tensor, comm_ptr: int) -> Tensor:
+    """
+    Performs MPI allreduce operation on the input tensor in-place.
+    
+    Args:
+        input: Input tensor to reduce (will be modified in-place)
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+        
+    Returns:
+        Reduced tensor (same tensor as input)
+    """
+    return torch.ops.torch_mpi_ext.all_reduce_.default(input, comm_ptr)
+
+
+def all_reduce(input: Tensor, comm_ptr: int) -> Tensor:
+    """
+    Performs MPI allreduce operation on the input tensor.
+    
+    Args:
+        input: Input tensor to reduce
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+        
+    Returns:
+        Reduced tensor with same shape as input
+    """
+    return torch.ops.torch_mpi_ext.all_reduce.default(input, comm_ptr)
+
+
+def all_gather(input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
+    """
+    Performs MPI allgather operation on the input tensor.
+    
+    Args:
+        input: Input tensor to gather
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+        dim: Dimension along which to concatenate the gathered tensors
+        
+    Returns:
+        Gathered tensor with specified dimension scaled by world size
+    """
+    return torch.ops.torch_mpi_ext.all_gather.default(input, comm_ptr, dim)
+
+
+@torch.library.register_fake("torch_mpi_ext::all_reduce_")
+def _(input: Tensor, comm_ptr):
+    torch._check(isinstance(comm_ptr, int))
+    torch._check(input.device.type == "cpu")
+    # In-place operation returns the same tensor
+    return input
+
+
+@torch.library.register_fake("torch_mpi_ext::all_reduce")
+def _(input: Tensor, comm_ptr):
+    torch._check(isinstance(comm_ptr, int))
+    torch._check(input.device.type == "cpu")
+    return torch.empty_like(input)
+
