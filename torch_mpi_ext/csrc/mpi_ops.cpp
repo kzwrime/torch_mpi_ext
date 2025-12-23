@@ -55,6 +55,8 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
   MPI_Fint f_handle = (MPI_Fint)comm_ptr;
   MPI_Comm c_comm = MPI_Comm_f2c(f_handle);
 
+  TORCH_CHECK(input.is_contiguous(), "Input tensor must be contiguous");
+
   // TODO
   if (input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16) {
     at::Tensor input_fp32 = input.to(torch::kFloat32);
@@ -86,16 +88,23 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
 
 // All-reduce operation (out-of-place)
 at::Tensor all_reduce(const at::Tensor& input, long comm_ptr) {
-  at::Tensor input_clone = input.clone();
-  all_reduce_(input_clone, comm_ptr);
-  return input_clone;
+  if (input.is_contiguous()) {
+    at::Tensor input_new = input.clone();
+    all_reduce_(input_new, comm_ptr);
+    return input_new;
+  } else {
+    at::Tensor input_new = input.contiguous();
+    all_reduce_(input_new, comm_ptr);
+    return input_new;
+  }
 }
 
 // All-gather operation
-at::Tensor all_gather(const at::Tensor& input, long comm_ptr, int64_t dim) {
+at::Tensor all_gather(const at::Tensor& input_, long comm_ptr, int64_t dim) {
   MPI_Fint f_handle = (MPI_Fint)comm_ptr;
   MPI_Comm c_comm = MPI_Comm_f2c(f_handle);
 
+  const at::Tensor& input = input_.contiguous();
   auto datatype = get_mpi_width_datatype(input);
 
   int comm_size;

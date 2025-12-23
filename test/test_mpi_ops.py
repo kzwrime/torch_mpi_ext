@@ -25,6 +25,7 @@ class TestMPIOperations(TestCase):
         self.rank = self.comm.Get_rank()
         self.size = self.comm.Get_size()
         self.comm_ptr = self.comm.py2f()
+        
     def test_all_reduce_different_dtypes(self):
         """Test all_reduce with different data types"""
         dtypes = [torch.float32, torch.float64, torch.int8, torch.int16, 
@@ -94,6 +95,62 @@ class TestMPIOperations(TestCase):
 
                 # Check values
                 torch.testing.assert_close(result, expected)
+
+    def test_all_reduce_non_contiguous(self):
+        """Test all_reduce with non-contiguous tensors"""
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16, 
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+        
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                # Test with strided tensor (every other element)
+                tensor = torch.arange(0, 10, dtype=dtype).expand(3, 10)[::2]  # Non-contiguous
+                tensor = tensor * (self.rank + 1)  # Rank-specific values
+                
+                result = torch_mpi_ext.ops.all_reduce(tensor, self.comm_ptr)
+                
+                expected_sum = self.size * (self.size + 1) // 2
+                expected = torch.arange(0, 10, dtype=dtype).expand(3, 10)[::2] * expected_sum
+                
+                torch.testing.assert_close(result, expected)
+                
+                # Test with transposed tensor (non-contiguous)
+                tensor2 = torch.arange(0, 24, dtype=dtype).reshape(2, 3, 4).transpose(0, 2) * (self.rank + 1)
+                result2 = torch_mpi_ext.ops.all_reduce(tensor2, self.comm_ptr)
+                
+                expected_sum2 = self.size * (self.size + 1) // 2
+                expected2 = torch.arange(0, 24, dtype=dtype).reshape(2, 3, 4).transpose(0, 2) * expected_sum2
+                
+                torch.testing.assert_close(result2, expected2)
+
+    def test_all_gather_non_contiguous(self):
+        """Test all_gather with non-contiguous tensors"""
+        # Test with strided tensor (every other element)
+        tensor = torch.arange(0, 12, dtype=torch.float32).reshape(3, 4)[::2]  # Non-contiguous, shape (1, 4)
+        tensor = tensor * (self.rank + 1)  # Rank-specific values
+        
+        result = torch_mpi_ext.ops.all_gather(tensor, self.comm_ptr, dim=0)
+        
+        # Expected: concatenated results from all ranks along dim=0
+        expected_parts = []
+        for r in range(self.size):
+            part = torch.arange(0, 12, dtype=torch.float32).reshape(3, 4)[::2] * (r + 1)
+            expected_parts.append(part)
+        expected = torch.cat(expected_parts, dim=0)
+        
+        torch.testing.assert_close(result, expected)
+        
+        # Test with transposed tensor (non-contiguous)
+        tensor2 = torch.arange(0, 24, dtype=torch.float32).reshape(2, 3, 4).transpose(1, 2) * (self.rank + 1)
+        result2 = torch_mpi_ext.ops.all_gather(tensor2, self.comm_ptr, dim=1)
+        
+        expected_parts2 = []
+        for r in range(self.size):
+            part2 = torch.arange(0, 24, dtype=torch.float32).reshape(2, 3, 4).transpose(1, 2) * (r + 1)
+            expected_parts2.append(part2)
+        expected2 = torch.cat(expected_parts2, dim=1)
+        
+        torch.testing.assert_close(result2, expected2)
 
 if __name__ == "__main__":
     # Only run tests if we're in an MPI environment
