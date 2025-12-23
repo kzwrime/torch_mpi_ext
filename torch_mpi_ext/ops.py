@@ -1,7 +1,7 @@
 import torch
 from torch import Tensor
 
-__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_reduce_", "all_gather"]
+__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_gather_into_tensor"]
 
 
 def mymuladd(a: Tensor, b: Tensor, c: float) -> Tensor:
@@ -91,7 +91,7 @@ def all_reduce(input: Tensor, comm_ptr: int) -> Tensor:
     return torch.ops.torch_mpi_ext.all_reduce.default(input, comm_ptr)
 
 
-def all_gather(input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
+def all_gather_into_tensor(input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
     """
     Performs MPI allgather operation on the input tensor.
     
@@ -103,10 +103,10 @@ def all_gather(input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
     Returns:
         Gathered tensor with specified dimension scaled by world size
     """
-    return torch.ops.torch_mpi_ext.all_gather.default(input, comm_ptr, dim)
+    return torch.ops.torch_mpi_ext.all_gather_into_tensor.default(input, comm_ptr, dim)
 
 
-def all_gather_into_tensor(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1) -> None:
+def all_gather_into_tensor_out(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
     """
     Performs MPI allgather operation on the input tensor and writes the result directly to the output tensor.
     
@@ -117,9 +117,9 @@ def all_gather_into_tensor(output: Tensor, input: Tensor, comm_ptr: int, dim: in
         dim: Dimension along which to concatenate the gathered tensors
         
     Returns:
-        None (result is written to the output tensor)
+        Same output tensor with gathered values written to it
     """
-    torch.ops.torch_mpi_ext.all_gather_into_tensor.default(output, input, comm_ptr, dim)
+    return torch.ops.torch_mpi_ext.all_gather_into_tensor_out.default(output, input, comm_ptr, dim)
 
 
 @torch.library.register_fake("torch_mpi_ext::all_reduce_")
@@ -137,9 +137,24 @@ def _(input: Tensor, comm_ptr):
     return torch.empty_like(input)
 
 
-@torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor")
+@torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor_out")
 def _(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1):
     torch._check(isinstance(comm_ptr, int))
     torch._check(input.device.type == "cpu")
     torch._check(output.device.type == "cpu")
+    
+    # Normalize negative dim values
+    ndim = input.ndim
+    torch._check(dim >= -ndim and dim < ndim)
+    if dim < 0:
+        dim = dim + ndim
+    
+    # Check that shapes match in all dimensions except dim
+    for i in range(ndim):
+        if i != dim:
+            torch._check(input.size(i) == output.size(i))
+    
+    # Check that output size at dim is a multiple of input size at dim
+    torch._check(output.size(dim) % input.size(dim) == 0)
+    
     # This is an out-of-place operation that writes to output tensor

@@ -68,7 +68,7 @@ class TestMPIOperations(TestCase):
                     
                 torch.testing.assert_close(tensor, expected)
 
-    def test_all_gather_negative_dim_different_dtypes(self):
+    def test_all_gather_into_tensor_different_dtypes_and_dims(self):
         """Test all_gather with negative dim"""
 
         dims = [-1, -2, -3, 0, 1, 2]
@@ -83,7 +83,7 @@ class TestMPIOperations(TestCase):
                     tensor = torch.arange(0, 2 * 3 * 4, dtype=dtype).reshape(2, 3, 4) * (self.rank + 1)
 
                     # Perform all-gather on dim=-2 (should be same as dim=1)
-                    result = torch_mpi_ext.ops.all_gather(tensor, comm_ptr=self.comm_ptr, dim=dim)
+                    result = torch_mpi_ext.ops.all_gather_into_tensor(tensor, comm_ptr=self.comm_ptr, dim=dim)
 
                     expected_shape = [2, 3, 4]
                     expected_shape[dim] *= self.size
@@ -126,13 +126,13 @@ class TestMPIOperations(TestCase):
                 
                 torch.testing.assert_close(result2, expected2)
 
-    def test_all_gather_non_contiguous(self):
-        """Test all_gather with non-contiguous tensors"""
+    def test_all_gather_into_tensor_non_contiguous(self):
+        """Test all_gather_into_tensor with non-contiguous tensors"""
         # Test with strided tensor (every other element)
         tensor = torch.arange(0, 12, dtype=torch.float32).reshape(3, 4)[::2]  # Non-contiguous, shape (1, 4)
         tensor = tensor * (self.rank + 1)  # Rank-specific values
         
-        result = torch_mpi_ext.ops.all_gather(tensor, self.comm_ptr, dim=0)
+        result = torch_mpi_ext.ops.all_gather_into_tensor(tensor, self.comm_ptr, dim=0)
         
         # Expected: concatenated results from all ranks along dim=0
         expected_parts = []
@@ -145,7 +145,7 @@ class TestMPIOperations(TestCase):
         
         # Test with transposed tensor (non-contiguous)
         tensor2 = torch.arange(0, 24, dtype=torch.float32).reshape(2, 3, 4).transpose(1, 2) * (self.rank + 1)
-        result2 = torch_mpi_ext.ops.all_gather(tensor2, self.comm_ptr, dim=1)
+        result2 = torch_mpi_ext.ops.all_gather_into_tensor(tensor2, self.comm_ptr, dim=1)
         
         expected_parts2 = []
         for r in range(self.size):
@@ -155,8 +155,8 @@ class TestMPIOperations(TestCase):
         
         torch.testing.assert_close(result2, expected2)
 
-    def test_all_gather_into_tensor_different_dtypes_and_dims(self):
-        """Test all_gather_into_tensor with different data types and dimensions"""
+    def test_all_gather_into_tensor_out_different_dtypes_and_dims(self):
+        """Test all_gather_into_tensor_out with different data types and dimensions"""
         dims = [-1, -2, -3, 0, 1, 2]
         dtypes = [torch.float32, torch.float64, torch.int8, torch.int16, 
                   torch.int32, torch.int64, torch.float16, torch.bfloat16]
@@ -178,7 +178,7 @@ class TestMPIOperations(TestCase):
                     output_tensor = torch.empty(expected_shape, dtype=dtype)
 
                     # Perform all-gather-into-tensor on specified dim
-                    torch_mpi_ext.ops.all_gather_into_tensor(output_tensor, tensor, self.comm_ptr, dim=dim)
+                    torch_mpi_ext.ops.all_gather_into_tensor_out(output_tensor, tensor, self.comm_ptr, dim=dim)
 
                     # Verify shape
                     self.assertEqual(output_tensor.shape, torch.Size(expected_shape))
@@ -193,9 +193,9 @@ class TestMPIOperations(TestCase):
 
                     # Check values
                     torch.testing.assert_close(output_tensor, expected)
-    
-    def test_all_gather_into_tensor_non_contiguous(self):
-        """Test all_gather_into_tensor with non-contiguous tensors"""
+
+    def test_all_gather_into_tensor_out_non_contiguous(self):
+        """Test all_gather_into_tensor_out with non-contiguous tensors"""
         dtypes = [torch.float32, torch.float64, torch.int8, torch.int16, 
                   torch.int32, torch.int64, torch.float16, torch.bfloat16]
         
@@ -210,8 +210,8 @@ class TestMPIOperations(TestCase):
                 expected_shape[0] *= self.size  # Concatenate along dim 0 by default
                 output_tensor = torch.empty(expected_shape, dtype=dtype)
                 
-                # Perform all-gather-into-tensor
-                torch_mpi_ext.ops.all_gather_into_tensor(output_tensor, input_tensor, self.comm_ptr, dim=0)
+                # Perform all-gather-into-tensor-out
+                torch_mpi_ext.ops.all_gather_into_tensor_out(output_tensor, input_tensor, self.comm_ptr, dim=0)
                 
                 # Prepare expected result
                 expected_parts = []
@@ -231,9 +231,9 @@ class TestMPIOperations(TestCase):
                 expected_shape2[1] *= self.size  # Concatenate along dim 1
                 output_tensor2 = torch.empty(expected_shape2, dtype=dtype)
                 
-                # Perform all-gather-into-tensor along dim=1
-                torch_mpi_ext.ops.all_gather_into_tensor(output_tensor2, input_tensor2, self.comm_ptr, dim=1)
-                
+                # Perform all-gather-into-tensor-out along dim=1
+                torch_mpi_ext.ops.all_gather_into_tensor_out(output_tensor2, input_tensor2, self.comm_ptr, dim=1)
+
                 # Prepare expected result
                 expected_parts2 = []
                 for r in range(self.size):
@@ -334,7 +334,7 @@ class TestMPICompile(TestCase):
             input_tensor = input_tensor * 2.0
             
             # MPI operation - all_gather_into_tensor modifies output_tensor in-place
-            torch_mpi_ext.ops.all_gather_into_tensor(output_tensor, input_tensor, comm_ptr, dim=dim)
+            torch_mpi_ext.ops.all_gather_into_tensor_out(output_tensor, input_tensor, comm_ptr, dim=dim)
             
             # Simple operations after the MPI operation
             output_tensor = output_tensor - 1.0

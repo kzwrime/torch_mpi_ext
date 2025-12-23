@@ -102,7 +102,7 @@ at::Tensor all_reduce(const at::Tensor& input, long comm_ptr) {
 }
 
 // All-gather operation
-at::Tensor all_gather(const at::Tensor& input_, long comm_ptr, int64_t dim) {
+at::Tensor all_gather_into_tensor(const at::Tensor& input_, long comm_ptr, int64_t dim) {
   MPI_Fint f_handle = (MPI_Fint)comm_ptr;
   MPI_Comm c_comm = MPI_Comm_f2c(f_handle);
 
@@ -153,7 +153,7 @@ at::Tensor all_gather(const at::Tensor& input_, long comm_ptr, int64_t dim) {
 }
 
 // All-gather operation that writes directly into a pre-allocated output tensor
-void all_gather_into_tensor(at::Tensor& output, const at::Tensor& input_, long comm_ptr, int64_t dim) {
+at::Tensor& all_gather_into_tensor_out(at::Tensor& output, const at::Tensor& input_, long comm_ptr, int64_t dim) {
   MPI_Fint f_handle = (MPI_Fint)comm_ptr;
   MPI_Comm c_comm = MPI_Comm_f2c(f_handle);
 
@@ -209,4 +209,6 @@ void all_gather_into_tensor(at::Tensor& output, const at::Tensor& input_, long c
   output.copy_(temp_buffer.reshape(expected_shape));
 
   TORCH_CHECK(output.is_contiguous(), "tensor must be contiguous");
+
+  return output;
 }
