@@ -244,6 +244,129 @@ class TestMPIOperations(TestCase):
                 # Check values
                 torch.testing.assert_close(output_tensor2, expected2)
 
+@unittest.skipIf(not MPI_AVAILABLE, "mpi4py not available")
+@unittest.skipIf(not EXTENSION_AVAILABLE, "torch_mpi_ext not available")
+class TestMPICompile(TestCase):
+    """Tests for torch.compile compatibility with MPI operations"""
+    
+    def setUp(self):
+        self.comm = MPI.COMM_WORLD
+        self.rank = self.comm.Get_rank()
+        self.size = self.comm.Get_size()
+        self.comm_ptr = self.comm.py2f()
+    
+    def test_compile_all_reduce(self):
+        """Test all_reduce with torch.compile"""
+        
+        def model(x, comm_ptr):
+            # Simple operations before the MPI operation
+            x = x + 1.0
+            x = x * 2.0
+            
+            # MPI operation
+            result = torch_mpi_ext.ops.all_reduce(x, comm_ptr)
+            
+            # Simple operations after the MPI operation
+            result = result - 1.0
+            result = result / self.size  # Expected average after allreduce
+            
+            return result
+        
+        for size in [1000, 5000]:
+            with self.subTest(size=size):
+                torch.manual_seed(42)
+                x = torch.randn((size,), dtype=torch.float32) * (self.rank + 1)
+                
+                with torch.no_grad():
+                    expected = model(x, self.comm_ptr)
+                    compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
+                    actual = compiled_model(x, self.comm_ptr)
+                
+                self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
+    # def test_compile_all_reduce_inplace(self):
+    #     """Test all_reduce_ with torch.compile"""
+        
+    #     def model(x, comm_ptr):
+    #         # Store original values to verify inplace operation
+    #         original_shape = x.shape
+    #         original_device = x.device
+            
+    #         # Simple operations before the MPI operation
+    #         x = x + 1.0
+    #         x = x * 2.0
+            
+    #         # MPI inplace operation
+    #         torch_mpi_ext.ops.all_reduce_(x, comm_ptr)
+            
+    #         # Simple operations after the MPI operation
+    #         x = x - 1.0
+    #         x = x / self.size  # Expected average after allreduce
+            
+    #         # Verify it's still the same tensor (inplace operation)
+    #         self.assertEqual(x.shape, original_shape)
+    #         self.assertEqual(x.device, original_device)
+            
+    #         return x
+        
+    #     for size in [1000, 5000]:
+    #         with self.subTest(size=size):
+    #             torch.manual_seed(42)
+    #             x = torch.randn((size,), dtype=torch.float32) * (self.rank + 1)
+                
+    #             with torch.no_grad():
+    #                 # Clone x for expected and actual to avoid in-place modifications affecting both
+    #                 x_expected = x.clone()
+    #                 x_actual = x.clone()
+                    
+    #                 expected = model(x_expected, self.comm_ptr)
+    #                 compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
+    #                 actual = compiled_model(x_actual, self.comm_ptr)
+                
+    #             self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_compile_all_gather_into_tensor(self):
+        """Test all_gather_into_tensor with torch.compile"""
+        
+        def model(input_tensor, output_tensor, comm_ptr, dim):
+            # Simple operations before the MPI operation
+            input_tensor = input_tensor + 1.0
+            input_tensor = input_tensor * 2.0
+            
+            # MPI operation - all_gather_into_tensor modifies output_tensor in-place
+            torch_mpi_ext.ops.all_gather_into_tensor(output_tensor, input_tensor, comm_ptr, dim=dim)
+            
+            # Simple operations after the MPI operation
+            output_tensor = output_tensor - 1.0
+            output_tensor = output_tensor / 2.0
+            
+            return output_tensor
+        
+        for size in [1000, 2000]:  # Using smaller sizes due to memory requirements for all_gather
+            with self.subTest(size=size):
+                torch.manual_seed(42)
+                
+                # Create input tensor
+                input_tensor = torch.randn((size,), dtype=torch.float32) * (self.rank + 1)
+                
+                # Create output tensor with appropriate size (will be size * world_size)
+                output_shape = list(input_tensor.shape)
+                output_shape[0] *= self.size
+                output_tensor = torch.empty(output_shape, dtype=torch.float32)
+                
+                # Clone tensors for expected and actual
+                input_expected = input_tensor.clone()
+                input_actual = input_tensor.clone()
+                output_expected = torch.empty(output_shape, dtype=torch.float32)
+                output_actual = torch.empty(output_shape, dtype=torch.float32)
+                
+                with torch.no_grad():
+                    expected = model(input_expected, output_expected, self.comm_ptr, dim=0)
+                    compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
+                    actual = compiled_model(input_actual, output_actual, self.comm_ptr, dim=0)
+                
+                self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
 if __name__ == "__main__":
     # Only run tests if we're in an MPI environment
     try:

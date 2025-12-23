@@ -143,4 +143,3 @@ def _(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1):
     torch._check(input.device.type == "cpu")
     torch._check(output.device.type == "cpu")
     # This is an out-of-place operation that writes to output tensor
-    return output
