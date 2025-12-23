@@ -41,6 +41,8 @@ MPI_Datatype get_mpi_width_datatype(const at::Tensor& tensor) {
              tensor.dtype() == torch::kBFloat16 ||
              tensor.dtype() == torch::kInt16) {
     datatype = MPI_SHORT;
+  } else if (tensor.dtype() == torch::kInt8) {
+    datatype = MPI_CHAR;
   } else if (tensor.dtype() == torch::kFloat64 ||
              tensor.dtype() == torch::kInt64) {
     datatype = MPI_LONG_LONG;

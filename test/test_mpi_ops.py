@@ -68,33 +68,36 @@ class TestMPIOperations(TestCase):
                     
                 torch.testing.assert_close(tensor, expected)
 
-    def test_all_gather_negative_dim(self):
+    def test_all_gather_negative_dim_different_dtypes(self):
         """Test all_gather with negative dim"""
 
         dims = [-1, -2, -3, 0, 1, 2]
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16, 
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
 
         for dim in dims:
-            with self.subTest(dim=dim):
+            for dtype in dtypes:
+                with self.subTest(dim=dim, dtype=dtype):
 
-                # Create rank-specific tensor
-                tensor = torch.arange(0, 2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4) * (self.rank + 1)
+                    # Create rank-specific tensor
+                    tensor = torch.arange(0, 2 * 3 * 4, dtype=dtype).reshape(2, 3, 4) * (self.rank + 1)
 
-                # Perform all-gather on dim=-2 (should be same as dim=1)
-                result = torch_mpi_ext.ops.all_gather(tensor, comm_ptr=self.comm_ptr, dim=dim)
+                    # Perform all-gather on dim=-2 (should be same as dim=1)
+                    result = torch_mpi_ext.ops.all_gather(tensor, comm_ptr=self.comm_ptr, dim=dim)
 
-                expected_shape = [2, 3, 4]
-                expected_shape[dim] *= self.size
-                self.assertEqual(result.shape, torch.Size(expected_shape))
+                    expected_shape = [2, 3, 4]
+                    expected_shape[dim] *= self.size
+                    self.assertEqual(result.shape, torch.Size(expected_shape))
 
-                expected_parts = []
-                for r in range(self.size):
-                    part = torch.arange(0, 2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4) * (r + 1)
-                    expected_parts.append(part)
+                    expected_parts = []
+                    for r in range(self.size):
+                        part = torch.arange(0, 2 * 3 * 4, dtype=dtype).reshape(2, 3, 4) * (r + 1)
+                        expected_parts.append(part)
 
-                expected = torch.cat(expected_parts, dim=dim)
+                    expected = torch.cat(expected_parts, dim=dim)
 
-                # Check values
-                torch.testing.assert_close(result, expected)
+                    # Check values
+                    torch.testing.assert_close(result, expected)
 
     def test_all_reduce_non_contiguous(self):
         """Test all_reduce with non-contiguous tensors"""
