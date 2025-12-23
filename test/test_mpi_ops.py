@@ -155,6 +155,95 @@ class TestMPIOperations(TestCase):
         
         torch.testing.assert_close(result2, expected2)
 
+    def test_all_gather_into_tensor_different_dtypes_and_dims(self):
+        """Test all_gather_into_tensor with different data types and dimensions"""
+        dims = [-1, -2, -3, 0, 1, 2]
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16, 
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+
+        for dim in dims:
+            for dtype in dtypes:
+                with self.subTest(dim=dim, dtype=dtype):
+                    # Create rank-specific tensor
+                    tensor = torch.arange(0, 2 * 3 * 4, dtype=dtype).reshape(2, 3, 4) * (self.rank + 1)
+
+                    # Calculate expected output shape
+                    expected_shape = list(tensor.shape)
+                    actual_dim = dim
+                    if actual_dim < 0:
+                        actual_dim += tensor.dim()
+                    expected_shape[actual_dim] *= self.size
+
+                    # Create output tensor with correct shape
+                    output_tensor = torch.empty(expected_shape, dtype=dtype)
+
+                    # Perform all-gather-into-tensor on specified dim
+                    torch_mpi_ext.ops.all_gather_into_tensor(output_tensor, tensor, self.comm_ptr, dim=dim)
+
+                    # Verify shape
+                    self.assertEqual(output_tensor.shape, torch.Size(expected_shape))
+
+                    # Prepare expected result
+                    expected_parts = []
+                    for r in range(self.size):
+                        part = torch.arange(0, 2 * 3 * 4, dtype=dtype).reshape(2, 3, 4) * (r + 1)
+                        expected_parts.append(part)
+
+                    expected = torch.cat(expected_parts, dim=dim)
+
+                    # Check values
+                    torch.testing.assert_close(output_tensor, expected)
+    
+    def test_all_gather_into_tensor_non_contiguous(self):
+        """Test all_gather_into_tensor with non-contiguous tensors"""
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16, 
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+        
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                # Test with strided tensor (every other element) - non-contiguous
+                input_tensor = torch.arange(0, 12, dtype=dtype).reshape(3, 4)[::2]  # Shape (1, 4)
+                input_tensor = input_tensor * (self.rank + 1)  # Rank-specific values
+                
+                # Calculate expected output shape
+                expected_shape = list(input_tensor.shape)
+                expected_shape[0] *= self.size  # Concatenate along dim 0 by default
+                output_tensor = torch.empty(expected_shape, dtype=dtype)
+                
+                # Perform all-gather-into-tensor
+                torch_mpi_ext.ops.all_gather_into_tensor(output_tensor, input_tensor, self.comm_ptr, dim=0)
+                
+                # Prepare expected result
+                expected_parts = []
+                for r in range(self.size):
+                    part = torch.arange(0, 12, dtype=dtype).reshape(3, 4)[::2] * (r + 1)
+                    expected_parts.append(part)
+                expected = torch.cat(expected_parts, dim=0)
+                
+                # Check values
+                torch.testing.assert_close(output_tensor, expected)
+                
+                # Test with transposed tensor (non-contiguous)
+                input_tensor2 = torch.arange(0, 24, dtype=dtype).reshape(2, 3, 4).transpose(1, 2) * (self.rank + 1)  # Shape (2, 4, 3)
+                
+                # Calculate expected output shape for dim=1
+                expected_shape2 = list(input_tensor2.shape)
+                expected_shape2[1] *= self.size  # Concatenate along dim 1
+                output_tensor2 = torch.empty(expected_shape2, dtype=dtype)
+                
+                # Perform all-gather-into-tensor along dim=1
+                torch_mpi_ext.ops.all_gather_into_tensor(output_tensor2, input_tensor2, self.comm_ptr, dim=1)
+                
+                # Prepare expected result
+                expected_parts2 = []
+                for r in range(self.size):
+                    part = torch.arange(0, 24, dtype=dtype).reshape(2, 3, 4).transpose(1, 2) * (r + 1)
+                    expected_parts2.append(part)
+                expected2 = torch.cat(expected_parts2, dim=1)
+                
+                # Check values
+                torch.testing.assert_close(output_tensor2, expected2)
+
 if __name__ == "__main__":
     # Only run tests if we're in an MPI environment
     try:

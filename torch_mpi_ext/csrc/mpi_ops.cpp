@@ -147,5 +147,66 @@ at::Tensor all_gather(const at::Tensor& input_, long comm_ptr, int64_t dim) {
   final_shape[actual_dim] = final_shape[actual_dim] * comm_size;
   output = output.reshape(final_shape);
 
+  TORCH_CHECK(output.is_contiguous(), "tensor must be contiguous");
+
   return output;
+}
+
+// All-gather operation that writes directly into a pre-allocated output tensor
+void all_gather_into_tensor(at::Tensor& output, const at::Tensor& input_, long comm_ptr, int64_t dim) {
+  MPI_Fint f_handle = (MPI_Fint)comm_ptr;
+  MPI_Comm c_comm = MPI_Comm_f2c(f_handle);
+
+  const at::Tensor& input = input_.contiguous();
+  auto datatype = get_mpi_width_datatype(input);
+
+  int comm_size;
+  int result = MPI_Comm_size(c_comm, &comm_size);
+  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Comm_size failed");
+
+  int actual_dim = dim;
+  if (actual_dim < 0) {
+    actual_dim += input.dim();
+  }
+
+  auto input_sizes = input.sizes();
+
+  // Validate that the output tensor has the correct shape
+  std::vector<int64_t> expected_shape(input_sizes.begin(), input_sizes.end());
+  expected_shape[actual_dim] = expected_shape[actual_dim] * comm_size;
+  
+  TORCH_CHECK(output.sizes().vec() == expected_shape, 
+              "Output tensor has incorrect shape. Expected: ", expected_shape, 
+              " Got: ", output.sizes().vec());
+
+  // Create intermediate tensor with shape (world_size, ...) to receive the allgather result
+  std::vector<int64_t> intermediate_shape;
+  intermediate_shape.push_back(comm_size);
+  for (size_t i = 0; i < input_sizes.size(); ++i) {
+    intermediate_shape.push_back(input_sizes[i]);
+  }
+  
+  // We need a temporary tensor to hold the allgather result in the intermediate shape
+  // First, we create a tensor with the intermediate shape but flattened in the first 2 dimensions
+  // Then we use MPI_Allgather to fill it
+  at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
+
+  result = MPI_Allgather(input.data_ptr(),   // send buffer
+                         input.numel(),      // send count
+                         datatype,           // send datatype
+                         temp_buffer.data_ptr(),  // receive buffer
+                         input.numel(),      // receive count
+                         datatype,           // receive datatype
+                         c_comm              // communicator
+  );
+
+  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
+
+  // Move the world_size dimension to the target dim
+  temp_buffer = temp_buffer.movedim(0, actual_dim);
+
+  // Copy the result to the output tensor
+  output.copy_(temp_buffer.reshape(expected_shape));
+
+  TORCH_CHECK(output.is_contiguous(), "tensor must be contiguous");
 }

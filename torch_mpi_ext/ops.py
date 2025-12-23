@@ -106,6 +106,22 @@ def all_gather(input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
     return torch.ops.torch_mpi_ext.all_gather.default(input, comm_ptr, dim)
 
 
+def all_gather_into_tensor(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1) -> None:
+    """
+    Performs MPI allgather operation on the input tensor and writes the result directly to the output tensor.
+    
+    Args:
+        output: Output tensor to write the gathered result to
+        input: Input tensor to gather
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+        dim: Dimension along which to concatenate the gathered tensors
+        
+    Returns:
+        None (result is written to the output tensor)
+    """
+    torch.ops.torch_mpi_ext.all_gather_into_tensor.default(output, input, comm_ptr, dim)
+
+
 @torch.library.register_fake("torch_mpi_ext::all_reduce_")
 def _(input: Tensor, comm_ptr):
     torch._check(isinstance(comm_ptr, int))
@@ -120,3 +136,11 @@ def _(input: Tensor, comm_ptr):
     torch._check(input.device.type == "cpu")
     return torch.empty_like(input)
 
+
+@torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor")
+def _(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1):
+    torch._check(isinstance(comm_ptr, int))
+    torch._check(input.device.type == "cpu")
+    torch._check(output.device.type == "cpu")
+    # This is an out-of-place operation that writes to output tensor
+    return output
