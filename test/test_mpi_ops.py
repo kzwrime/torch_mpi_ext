@@ -284,46 +284,43 @@ class TestMPICompile(TestCase):
                 
                 self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
 
-    # def test_compile_all_reduce_inplace(self):
-    #     """Test all_reduce_ with torch.compile"""
+    def test_compile_all_reduce_inplace(self):
+        """Test all_reduce_ with torch.compile"""
         
-    #     def model(x, comm_ptr):
-    #         # Store original values to verify inplace operation
-    #         original_shape = x.shape
-    #         original_device = x.device
+        def model(x, comm_ptr):
+            # Store original values to verify inplace operation
+            original_shape = x.shape
+            original_device = x.device
             
-    #         # Simple operations before the MPI operation
-    #         x = x + 1.0
-    #         x = x * 2.0
+            # Simple operations before the MPI operation
+            x = x + 1.0
+            x = x * 2.0
             
-    #         # MPI inplace operation
-    #         torch_mpi_ext.ops.all_reduce_(x, comm_ptr)
+            # MPI inplace operation
+            torch_mpi_ext.ops.all_reduce_(x, comm_ptr)
+
+            # Simple operations after the MPI operation
+            x = x - 1.0
+            x = x / self.size  # Expected average after allreduce
             
-    #         # Simple operations after the MPI operation
-    #         x = x - 1.0
-    #         x = x / self.size  # Expected average after allreduce
-            
-    #         # Verify it's still the same tensor (inplace operation)
-    #         self.assertEqual(x.shape, original_shape)
-    #         self.assertEqual(x.device, original_device)
-            
-    #         return x
+            return x
         
-    #     for size in [1000, 5000]:
-    #         with self.subTest(size=size):
-    #             torch.manual_seed(42)
-    #             x = torch.randn((size,), dtype=torch.float32) * (self.rank + 1)
+        for size in [1000, 5000]:
+            with self.subTest(size=size):
+                torch.manual_seed(42)
+                x = torch.randn((size,), dtype=torch.float32) * (self.rank + 1)
                 
-    #             with torch.no_grad():
-    #                 # Clone x for expected and actual to avoid in-place modifications affecting both
-    #                 x_expected = x.clone()
-    #                 x_actual = x.clone()
+                with torch.no_grad():
+                    # Clone x for expected and actual to avoid in-place modifications affecting both
+                    x_expected = x.clone()
+                    x_actual = x.clone()
                     
-    #                 expected = model(x_expected, self.comm_ptr)
-    #                 compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
-    #                 actual = compiled_model(x_actual, self.comm_ptr)
+                    expected = model(x_expected, self.comm_ptr)
+                    # compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
+                    compiled_model = torch.compile(model, fullgraph=True)
+                    actual = compiled_model(x_actual, self.comm_ptr)
                 
-    #             self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+                self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
 
     def test_compile_all_gather_into_tensor(self):
         """Test all_gather_into_tensor with torch.compile"""

@@ -63,7 +63,7 @@ def myadd_out(a: Tensor, b: Tensor, out: Tensor) -> None:
     torch.ops.torch_mpi_ext.myadd_out.default(a, b, out)
 
 
-def all_reduce_(input: Tensor, comm_ptr: int) -> Tensor:
+def all_reduce_(input: Tensor, comm_ptr: int):
     """
     Performs MPI allreduce operation on the input tensor in-place.
     
@@ -127,7 +127,7 @@ def _(input: Tensor, comm_ptr):
     torch._check(isinstance(comm_ptr, int))
     torch._check(input.device.type == "cpu")
     # In-place operation returns the same tensor
-    return input
+    return
 
 
 @torch.library.register_fake("torch_mpi_ext::all_reduce")
