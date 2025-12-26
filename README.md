@@ -9,13 +9,16 @@ The examples in this repo work with PyTorch 2.4+.
 
 To build:
 ```
+# install mode
+CXX=mpicxx pip install --no-build-isolation .
+# develop mode
 CXX=mpicxx pip install --no-build-isolation -e .
 ```
 
 To test:
 ```
 python test/test_extension.py
-mpirun -np 4 python3 -m pytest -s -x -v ./test/test_mpi_ops.py
+mpirun -np 2 python3 -m pytest -s -x -v ./test/test_mpi_ops.py
 ```
 
 ## Authors
