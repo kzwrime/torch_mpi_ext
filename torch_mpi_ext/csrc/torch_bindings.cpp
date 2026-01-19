@@ -5,11 +5,24 @@
 
 #include "muladd.h"
 
-// 声明 all_reduce、all_gather_into_tensor 和 all_gather_into_tensor_out 函数
+// 声明
+// all_reduce、all_gather_into_tensor、all_gather_into_tensor_out、alltoallv 和
+// alltoall 函数
 void all_reduce_(at::Tensor& input, long comm_ptr);
 at::Tensor all_reduce(const at::Tensor& input, long comm_ptr);
-at::Tensor all_gather_into_tensor(const at::Tensor& input, long comm_ptr, int64_t dim);
-void all_gather_into_tensor_out(at::Tensor& output, const at::Tensor& input, long comm_ptr, int64_t dim);
+at::Tensor all_gather_into_tensor(const at::Tensor& input, long comm_ptr,
+                                  int64_t dim);
+void all_gather_into_tensor_out(at::Tensor& output, const at::Tensor& input,
+                                long comm_ptr, int64_t dim);
+at::Tensor alltoallv(const at::Tensor& sendbuf, const at::Tensor& sendcounts,
+                     const at::Tensor& sdispls, const at::Tensor& recvcounts,
+                     const at::Tensor& rdispls, long comm_ptr);
+void alltoallv_out(at::Tensor& recvbuf, const at::Tensor& sendbuf,
+                   const at::Tensor& sendcounts, const at::Tensor& sdispls,
+                   const at::Tensor& recvcounts, const at::Tensor& rdispls,
+                   long comm_ptr);
+void alltoall_out(at::Tensor& recvbuf, const at::Tensor& sendbuf,
+                  long comm_ptr);
 
 extern "C" {
 /* Creates a dummy empty _C module that can be imported from Python.
@@ -38,8 +51,19 @@ TORCH_LIBRARY(torch_mpi_ext, m) {
   m.def("myadd_out(Tensor a, Tensor b, Tensor(a!) out) -> ()");
   m.def("all_reduce_(Tensor(a!) input, int comm_ptr) -> ()");
   m.def("all_reduce(Tensor input, int comm_ptr) -> Tensor");
-  m.def("all_gather_into_tensor(Tensor input, int comm_ptr, int dim = -1) -> Tensor");
-  m.def("all_gather_into_tensor_out(Tensor(a!) output, Tensor input, int comm_ptr, int dim = -1) -> ()");
+  m.def(
+      "all_gather_into_tensor(Tensor input, int comm_ptr, int dim = -1) -> "
+      "Tensor");
+  m.def(
+      "all_gather_into_tensor_out(Tensor(a!) output, Tensor input, int "
+      "comm_ptr, int dim = -1) -> ()");
+  m.def(
+      "alltoallv(Tensor sendbuf, Tensor sendcounts, Tensor sdispls, Tensor "
+      "recvcounts, Tensor rdispls, int comm_ptr) -> Tensor");
+  m.def(
+      "alltoallv_out(Tensor(a!) recvbuf, Tensor sendbuf, Tensor sendcounts, "
+      "Tensor sdispls, Tensor recvcounts, Tensor rdispls, int comm_ptr) -> ()");
+  m.def("alltoall_out(Tensor(a!) recvbuf, Tensor sendbuf, int comm_ptr) -> ()");
 }
 
 // Registers CPU implementations for mymuladd, mymul, myadd_out
@@ -51,6 +75,9 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, CPU, m) {
   m.impl("all_reduce", &all_reduce);
   m.impl("all_gather_into_tensor", &all_gather_into_tensor);
   m.impl("all_gather_into_tensor_out", &all_gather_into_tensor_out);
+  m.impl("alltoallv", &alltoallv);
+  m.impl("alltoallv_out", &alltoallv_out);
+  m.impl("alltoall_out", &alltoall_out);
 }
 
 }  // namespace torch_mpi_ext

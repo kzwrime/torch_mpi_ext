@@ -244,6 +244,318 @@ class TestMPIOperations(TestCase):
                 # Check values
                 torch.testing.assert_close(output_tensor2, expected2)
 
+    def test_alltoallv_different_dtypes(self):
+        """Test alltoallv with different data types"""
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16,
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                # Each rank sends different amount of data to each other rank
+                # For simplicity, each rank i sends (i+1) elements to each rank j
+                sendcounts = torch.tensor([(self.rank + 1) for _ in range(self.size)], dtype=torch.int32)
+                recvcounts = torch.tensor([(r + 1) for r in range(self.size)], dtype=torch.int32)
+
+                # Calculate displacements
+                sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                rdispls = torch.tensor([sum(recvcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+
+                # Total elements to send
+                total_send = int(sendcounts.sum().item())
+                total_recv = int(recvcounts.sum().item())
+
+                # Create send buffer with rank-specific values
+                sendbuf = torch.arange(total_send, dtype=dtype) * (self.rank + 1)
+
+                # Perform alltoallv
+                result = torch_mpi_ext.ops.alltoallv(sendbuf, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+
+                # Verify shape
+                self.assertEqual(result.shape, torch.Size([total_recv]))
+
+                # Verify values - each rank should receive data from all ranks
+                # Data from rank r at position corresponding to rank r
+                expected = torch.empty(total_recv, dtype=dtype)
+                for rank in range(self.size):
+                    # Re-create sendbuf like rank-i sends
+                    sendcounts = torch.tensor([(rank + 1) for _ in range(self.size)], dtype=torch.int32)
+                    sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                    total_send = int(sendcounts.sum().item())
+                    sendbuf = torch.arange(total_send, dtype=dtype) * (rank + 1)
+
+                    expected[rdispls[rank]:rdispls[rank]+recvcounts[rank]] = sendbuf[sdispls[self.rank]:sdispls[self.rank]+sendcounts[self.rank]]
+
+                torch.testing.assert_close(result, expected)
+
+
+    def test_alltoallv_out_different_dtypes(self):
+        """Test alltoallv_out with different data types"""
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16,
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                # Each rank i sends different amount of data to each other rank
+                sendcounts = torch.tensor([(self.rank + 1) for _ in range(self.size)], dtype=torch.int32)
+                recvcounts = torch.tensor([(r + 1) for r in range(self.size)], dtype=torch.int32)
+
+                # Calculate displacements
+                sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                rdispls = torch.tensor([sum(recvcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+
+                # Total elements
+                total_send = int(sendcounts.sum().item())
+                total_recv = int(recvcounts.sum().item())
+
+                # Create send buffer
+                sendbuf = torch.arange(total_send, dtype=dtype) * (self.rank + 1)
+
+                # Create receive buffer
+                recvbuf = torch.empty(total_recv, dtype=dtype)
+
+                # Perform alltoallv_out
+                result = torch_mpi_ext.ops.alltoallv_out(recvbuf, sendbuf, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+
+                # Verify return value (in-place returns None)
+                self.assertTrue(result == None)
+
+                # print(f"[{self.rank}] sendbuf: {sendbuf}, sendcounts {sendcounts}, sdispls {sdispls}")
+                # print(f"[{self.rank}] recvbuf: {recvbuf}, recvcounts {recvcounts}, rdispls {rdispls}")
+
+                # Verify values
+                expected = torch.empty(total_recv, dtype=dtype)
+                for rank in range(self.size):
+
+                    # Re-create sendbuf like rank-i sends
+                    sendcounts = torch.tensor([(rank + 1) for _ in range(self.size)], dtype=torch.int32)
+                    sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                    total_send = int(sendcounts.sum().item())
+                    sendbuf = torch.arange(total_send, dtype=dtype) * (rank + 1)
+    
+                    # print(f"[{self.rank}][{rank}] sendbuf: {sendbuf}, sendcounts {sendcounts}, sdispls {sdispls}, ")
+                    expected[rdispls[rank]:rdispls[rank]+recvcounts[rank]] = sendbuf[sdispls[self.rank]:sdispls[self.rank]+sendcounts[self.rank]]
+
+                torch.testing.assert_close(recvbuf, expected)
+
+    def test_alltoallv_non_contiguous(self):
+        """Test alltoallv with non-contiguous tensors"""
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16,
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                # Setup counts and displacements
+                sendcounts = torch.tensor([(self.rank + 1) for _ in range(self.size)], dtype=torch.int32)
+                recvcounts = torch.tensor([(r + 1) for r in range(self.size)], dtype=torch.int32)
+
+                sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                rdispls = torch.tensor([sum(recvcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+
+                total_send = int(sendcounts.sum().item())
+
+                # Create non-contiguous send buffer (strided)
+                base_tensor = torch.arange(0, total_send * 2, dtype=dtype)
+                sendbuf = base_tensor[::2] * (self.rank + 1)  # Non-contiguous
+
+                # Perform alltoallv (should handle non-contiguous input)
+                result = torch_mpi_ext.ops.alltoallv(sendbuf, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+
+                # Verify
+                total_recv = int(recvcounts.sum().item())
+                self.assertEqual(result.shape, torch.Size([total_recv]))
+
+                # Verify values - reconstruct expected from each rank's perspective
+                expected = torch.empty(total_recv, dtype=dtype)
+                for rank in range(self.size):
+                    # Re-create sendbuf like rank-i sends (with non-contiguous pattern)
+                    sendcounts = torch.tensor([(rank + 1) for _ in range(self.size)], dtype=torch.int32)
+                    sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                    total_send = int(sendcounts.sum().item())
+                    base = torch.arange(0, total_send * 2, dtype=dtype)[::2]
+                    sendbuf = base[:total_send] * (rank + 1)
+
+                    expected[rdispls[rank]:rdispls[rank]+recvcounts[rank]] = sendbuf[sdispls[self.rank]:sdispls[self.rank]+sendcounts[self.rank]]
+
+                torch.testing.assert_close(result, expected)
+
+    def test_alltoallv_2d_matrix_rows(self):
+        """Test alltoallv with 2D matrix - each rank sends different number of rows to each other rank"""
+        dtypes = [torch.float32, torch.float64, torch.int32, torch.int64]
+
+        # Test with different matrix sizes
+        for num_cols in [4, 8]:
+            for dtype in dtypes:
+                with self.subTest(dtype=dtype, num_cols=num_cols):
+                    # Each rank i sends (i+1) rows to each rank j
+                    rows_per_send = self.rank + 1  # Number of rows this rank sends to each other rank
+                    total_send_rows = rows_per_send * self.size
+
+                    # Calculate send counts (in elements, not rows)
+                    sendcounts = torch.tensor([rows_per_send * num_cols for _ in range(self.size)], dtype=torch.int32)
+
+                    # Calculate receive counts (rank j sends (j+1) rows)
+                    recvcounts = torch.tensor([(r + 1) * num_cols for r in range(self.size)], dtype=torch.int32)
+
+                    # Calculate displacements (in elements)
+                    sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                    rdispls = torch.tensor([sum(recvcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+
+                    # Total elements
+                    total_send = int(sendcounts.sum().item())
+                    total_recv = int(recvcounts.sum().item())
+                    total_recv_rows = total_recv // num_cols
+
+                    # Create send buffer (flattened 2D matrix)
+                    # Each row contains unique values based on rank
+                    sendbuf = torch.zeros(total_send, dtype=dtype)
+                    for i in range(total_send_rows):
+                        row_start = i * num_cols
+                        sendbuf[row_start:row_start + num_cols] = torch.arange(num_cols, dtype=dtype) + i * 100 + (self.rank + 1) * 1000
+
+                    # Perform alltoallv
+                    result = torch_mpi_ext.ops.alltoallv(sendbuf, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+
+                    # Verify shape
+                    self.assertEqual(result.shape, torch.Size([total_recv]))
+
+                    # Verify values - reconstruct expected from each rank's perspective
+                    expected = torch.zeros(total_recv, dtype=dtype)
+                    for rank in range(self.size):
+                        # Re-create sendbuf like rank-i sends
+                        rows_per_send_from_rank = rank + 1
+                        total_send_rows_from_rank = rows_per_send_from_rank * self.size
+                        sendcounts_from_rank = torch.tensor([rows_per_send_from_rank * num_cols for _ in range(self.size)], dtype=torch.int32)
+                        sdispls_from_rank = torch.tensor([sum(sendcounts_from_rank[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+                        total_send_from_rank = int(sendcounts_from_rank.sum().item())
+
+                        sendbuf_from_rank = torch.zeros(total_send_from_rank, dtype=dtype)
+                        for i in range(total_send_rows_from_rank):
+                            row_start = i * num_cols
+                            sendbuf_from_rank[row_start:row_start + num_cols] = torch.arange(num_cols, dtype=dtype) + i * 100 + (rank + 1) * 1000
+
+                        # Extract data that rank sends to self.rank
+                        send_start = sdispls_from_rank[self.rank]
+                        send_end = send_start + sendcounts_from_rank[self.rank]
+                        recv_start = rdispls[rank]
+                        recv_end = recv_start + recvcounts[rank]
+
+                        expected[recv_start:recv_end] = sendbuf_from_rank[send_start:send_end]
+
+                    torch.testing.assert_close(result, expected)
+
+    def test_alltoall_different_dtypes(self):
+        """Test alltoall with different data types"""
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16,
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                # Each rank sends count elements to each rank
+                count = 10  # Elements per rank
+                total_elements = count * self.size
+
+                # Create send buffer with rank-specific values
+                sendbuf = torch.arange(total_elements, dtype=dtype) * (self.rank + 1)
+
+                # Perform alltoall
+                result = torch_mpi_ext.ops.alltoall(sendbuf, self.comm_ptr)
+
+                # Verify shape
+                self.assertEqual(result.shape, torch.Size([total_elements]))
+
+                # Verify values - each rank should receive chunk i from rank i
+                expected = torch.empty(total_elements, dtype=dtype)
+                for rank in range(self.size):
+                    # Rank rank sends: [0, 1, ..., total_elements-1] * (rank + 1)
+                    # We receive the chunk that rank rank sent to us (rank self.rank)
+                    # Chunk for rank self.rank is [self.rank * count : (self.rank + 1) * count]
+                    chunk_start = self.rank * count
+                    chunk_end = (self.rank + 1) * count
+                    recv_pos = rank * count
+
+                    sendbuf_from_rank = torch.arange(total_elements, dtype=dtype) * (rank + 1)
+                    expected[recv_pos:recv_pos + count] = sendbuf_from_rank[chunk_start:chunk_end]
+
+                torch.testing.assert_close(result, expected)
+
+    def test_alltoall_out_different_dtypes(self):
+        """Test alltoall_out (pre-allocated output) with different data types"""
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16,
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                # Each rank sends count elements to each rank
+                count = 10  # Elements per rank
+                total_elements = count * self.size
+
+                # Create send buffer with rank-specific values
+                sendbuf = torch.arange(total_elements, dtype=dtype) * (self.rank + 1)
+
+                # Create receive buffer
+                recvbuf = torch.empty(total_elements, dtype=dtype)
+
+                # Perform alltoall_out
+                result = torch_mpi_ext.ops.alltoall_out(recvbuf, sendbuf, self.comm_ptr)
+
+                # Verify return value (in-place returns None)
+                self.assertTrue(result == None)
+
+                # Verify values
+                expected = torch.empty(total_elements, dtype=dtype)
+                for rank in range(self.size):
+                    chunk_start = self.rank * count
+                    chunk_end = (self.rank + 1) * count
+                    recv_pos = rank * count
+
+                    sendbuf_from_rank = torch.arange(total_elements, dtype=dtype) * (rank + 1)
+                    expected[recv_pos:recv_pos + count] = sendbuf_from_rank[chunk_start:chunk_end]
+
+                torch.testing.assert_close(recvbuf, expected)
+
+    def test_alltoall_2d_matrix_rows(self):
+        """Test alltoall with 2D matrix - each rank sends equal rows to all other ranks"""
+        dtypes = [torch.float32, torch.float64, torch.int32, torch.int64]
+
+        # Test with different matrix sizes
+        for num_cols in [4, 8]:
+            for dtype in dtypes:
+                with self.subTest(dtype=dtype, num_cols=num_cols):
+                    # Each rank sends same number of rows to each rank
+                    rows_per_rank = 3
+                    total_send_rows = rows_per_rank * self.size
+                    total_elements = total_send_rows * num_cols
+
+                    # Create send buffer (flattened 2D matrix)
+                    sendbuf = torch.empty(total_elements, dtype=dtype)
+                    for i in range(total_send_rows):
+                        row_start = i * num_cols
+                        sendbuf[row_start:row_start + num_cols] = torch.arange(num_cols, dtype=dtype) + i * 100 + (self.rank + 1) * 1000
+
+                    # Perform alltoall
+                    result = torch_mpi_ext.ops.alltoall(sendbuf, self.comm_ptr)
+
+                    # Verify shape
+                    self.assertEqual(result.shape, torch.Size([total_elements]))
+
+                    # Verify values
+                    expected = torch.empty(total_elements, dtype=dtype)
+                    for rank in range(self.size):
+                        # For each rank, reconstruct the chunk they sent to self.rank
+                        sendbuf_from_rank = torch.empty(total_elements, dtype=dtype)
+                        for i in range(total_send_rows):
+                            row_start = i * num_cols
+                            sendbuf_from_rank[row_start:row_start + num_cols] = torch.arange(num_cols, dtype=dtype) + i * 100 + (rank + 1) * 1000
+
+                        # Extract chunk that rank sent to self.rank
+                        chunk_start = self.rank * rows_per_rank * num_cols
+                        chunk_end = (self.rank + 1) * rows_per_rank * num_cols
+                        recv_pos = rank * rows_per_rank * num_cols
+
+                        expected[recv_pos:recv_pos + rows_per_rank * num_cols] = sendbuf_from_rank[chunk_start:chunk_end]
+
+                    torch.testing.assert_close(result, expected)
+
 @unittest.skipIf(not MPI_AVAILABLE, "mpi4py not available")
 @unittest.skipIf(not EXTENSION_AVAILABLE, "torch_mpi_ext not available")
 class TestMPICompile(TestCase):
@@ -364,6 +676,168 @@ class TestMPICompile(TestCase):
                 
                 self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
 
+    # def test_compile_alltoallv(self):
+    #     """Test alltoallv with torch.compile"""
+
+    #     def model(sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr):
+    #         # Simple operations before the MPI operation
+    #         sendbuf = sendbuf + 1.0
+    #         sendbuf = sendbuf * 2.0
+
+    #         # MPI operation
+    #         result = torch_mpi_ext.ops.alltoallv(sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+
+    #         # Simple operations after the MPI operation
+    #         result = result - 1.0
+    #         result = result / 2.0
+
+    #         return result
+
+    #     # Test with different data sizes
+    #     for data_size in [100, 500]:
+    #         with self.subTest(data_size=data_size):
+    #             torch.manual_seed(42)
+
+    #             # Each rank sends different amount of data to each other rank
+    #             sendcounts = torch.tensor([(self.rank + 1) * data_size // self.size for _ in range(self.size)], dtype=torch.int32)
+    #             recvcounts = torch.tensor([(r + 1) * data_size // self.size for r in range(self.size)], dtype=torch.int32)
+
+    #             sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+    #             rdispls = torch.tensor([sum(recvcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+
+    #             total_send = int(sendcounts.sum().item())
+    #             total_recv = int(recvcounts.sum().item())
+
+    #             sendbuf = torch.randn(total_send, dtype=torch.float32) * (self.rank + 1)
+
+    #             with torch.no_grad():
+    #                 expected = model(sendbuf, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+    #                 compiled_model = torch.compile(model, fullgraph=True)
+    #                 actual = compiled_model(sendbuf, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+
+    #             self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
+    # def test_compile_alltoallv_out(self):
+    #     """Test alltoallv_out (in-place) with torch.compile"""
+
+    #     def model(recvbuf, sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr):
+    #         # Simple operations before the MPI operation
+    #         sendbuf = sendbuf + 1.0
+    #         sendbuf = sendbuf * 2.0
+
+    #         # MPI inplace operation
+    #         torch_mpi_ext.ops.alltoallv_out(recvbuf, sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+
+    #         # Simple operations after the MPI operation
+    #         recvbuf = recvbuf - 1.0
+    #         recvbuf = recvbuf / 2.0
+
+    #         return recvbuf
+
+    #     # Test with different data sizes
+    #     for data_size in [100, 500]:
+    #         with self.subTest(data_size=data_size):
+    #             torch.manual_seed(42)
+
+    #             # Each rank sends different amount of data to each other rank
+    #             sendcounts = torch.tensor([(self.rank + 1) * data_size // self.size for _ in range(self.size)], dtype=torch.int32)
+    #             recvcounts = torch.tensor([(r + 1) * data_size // self.size for r in range(self.size)], dtype=torch.int32)
+
+    #             sdispls = torch.tensor([sum(sendcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+    #             rdispls = torch.tensor([sum(recvcounts[:j].tolist()) for j in range(self.size)], dtype=torch.int32)
+
+    #             total_send = int(sendcounts.sum().item())
+    #             total_recv = int(recvcounts.sum().item())
+
+    #             sendbuf = torch.randn(total_send, dtype=torch.float32) * (self.rank + 1)
+    #             recvbuf = torch.empty(total_recv, dtype=torch.float32)
+
+    #             with torch.no_grad():
+    #                 # Clone tensors for expected and actual
+    #                 sendbuf_expected = sendbuf.clone()
+    #                 sendbuf_actual = sendbuf.clone()
+    #                 recvbuf_expected = torch.empty(total_recv, dtype=torch.float32)
+    #                 recvbuf_actual = torch.empty(total_recv, dtype=torch.float32)
+
+    #                 expected = model(recvbuf_expected, sendbuf_expected, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+    #                 compiled_model = torch.compile(model, fullgraph=True)
+    #                 actual = compiled_model(recvbuf_actual, sendbuf_actual, sendcounts, sdispls, recvcounts, rdispls, self.comm_ptr)
+
+    #             self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_compile_alltoall(self):
+        """Test alltoall with torch.compile"""
+
+        def model(sendbuf, comm_ptr):
+            # Simple operations before the MPI operation
+            sendbuf = sendbuf + 1.0
+            sendbuf = sendbuf * 2.0
+
+            # MPI operation
+            result = torch_mpi_ext.ops.alltoall(sendbuf, comm_ptr)
+
+            # Simple operations after the MPI operation
+            result = result - 1.0
+            result = result / 2.0
+
+            return result
+
+        # Test with different data sizes
+        for data_size in [100, 500]:
+            with self.subTest(data_size=data_size):
+                torch.manual_seed(42)
+
+                # Each rank sends equal amount of data to each rank
+                total_elements = data_size * self.size
+                sendbuf = torch.randn(total_elements, dtype=torch.float32) * (self.rank + 1)
+
+                with torch.no_grad():
+                    expected = model(sendbuf, self.comm_ptr)
+                    compiled_model = torch.compile(model, fullgraph=True)
+                    actual = compiled_model(sendbuf, self.comm_ptr)
+
+                self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_compile_alltoall_out(self):
+        """Test alltoall_out (pre-allocated output) with torch.compile"""
+
+        def model(recvbuf, sendbuf, comm_ptr):
+            # Simple operations before the MPI operation
+            sendbuf = sendbuf + 1.0
+            sendbuf = sendbuf * 2.0
+
+            # MPI inplace operation
+            torch_mpi_ext.ops.alltoall_out(recvbuf, sendbuf, comm_ptr)
+
+            # Simple operations after the MPI operation
+            recvbuf = recvbuf - 1.0
+            recvbuf = recvbuf / 2.0
+
+            return recvbuf
+
+        # Test with different data sizes
+        for data_size in [100, 500]:
+            with self.subTest(data_size=data_size):
+                torch.manual_seed(42)
+
+                # Each rank sends equal amount of data to each rank
+                total_elements = data_size * self.size
+                sendbuf = torch.randn(total_elements, dtype=torch.float32) * (self.rank + 1)
+                recvbuf = torch.empty(total_elements, dtype=torch.float32)
+
+                with torch.no_grad():
+                    # Clone tensors for expected and actual
+                    sendbuf_expected = sendbuf.clone()
+                    sendbuf_actual = sendbuf.clone()
+                    recvbuf_expected = torch.empty(total_elements, dtype=torch.float32)
+                    recvbuf_actual = torch.empty(total_elements, dtype=torch.float32)
+
+                    expected = model(recvbuf_expected, sendbuf_expected, self.comm_ptr)
+                    compiled_model = torch.compile(model, fullgraph=True)
+                    actual = compiled_model(recvbuf_actual, sendbuf_actual, self.comm_ptr)
+
+                self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
 if __name__ == "__main__":
     # Only run tests if we're in an MPI environment
     try:
@@ -371,4 +845,4 @@ if __name__ == "__main__":
         unittest.main()
     except ImportError:
         print("Skipping MPI tests as mpi4py is not available")
-        sys.exit(0)
+        sys.exit(status=0)

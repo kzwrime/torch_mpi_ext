@@ -1,7 +1,8 @@
 import torch
 from torch import Tensor
 
-__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_gather_into_tensor"]
+__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_gather_into_tensor", 
+           "alltoall", "alltoall_out", "alltoallv", "alltoallv_out"]
 
 
 def mymuladd(a: Tensor, b: Tensor, c: float) -> Tensor:
@@ -122,6 +123,187 @@ def all_gather_into_tensor_out(output: Tensor, input: Tensor, comm_ptr: int, dim
     return torch.ops.torch_mpi_ext.all_gather_into_tensor_out.default(output, input, comm_ptr, dim)
 
 
+def alltoall(sendbuf: Tensor, comm_ptr: int) -> Tensor:
+    """
+    Performs MPI all-to-all operation.
+
+    All-to-all is a collective communication operation where each process
+    sends the same amount of data to all other processes and receives data
+    from all other processes.
+
+    The send buffer is divided into equal-sized chunks, one for each process.
+    Each process sends chunk j to process j, and receives chunk i from process i.
+
+    Args:
+        sendbuf: Tensor containing data to send. Size must be divisible by world_size.
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+
+    Returns:
+        Tensor containing the received data from all processes
+    """
+    _alltoall_check(sendbuf, comm_ptr)
+    recvbuf = torch.empty_like(sendbuf)
+    torch.ops.torch_mpi_ext.alltoall_out.default(recvbuf, sendbuf, comm_ptr)
+    return recvbuf
+
+
+def alltoall_out(recvbuf: Tensor, sendbuf: Tensor, comm_ptr: int) -> None:
+    """
+    Performs MPI all-to-all operation with pre-allocated output buffer.
+
+    All-to-all is a collective communication operation where each process
+    sends the same amount of data to all other processes and receives data
+    from all other processes.
+
+    The send buffer is divided into equal-sized chunks, one for each process.
+    Each process sends chunk j to process j, and receives chunk i from process i.
+
+    Args:
+        recvbuf: Pre-allocated tensor to write the received data to. Must have same size as sendbuf.
+        sendbuf: Tensor containing data to send. Size must be divisible by world_size.
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+
+    Returns:
+        None (result is written to recvbuf in-place)
+    """
+    _alltoall_out_check(recvbuf, sendbuf, comm_ptr)
+    torch.ops.torch_mpi_ext.alltoall_out.default(recvbuf, sendbuf, comm_ptr)
+
+
+def alltoallv(
+    sendbuf: Tensor,
+    sendcounts: Tensor,
+    sdispls: Tensor,
+    recvcounts: Tensor,
+    rdispls: Tensor,
+    comm_ptr: int,
+) -> Tensor:
+    """
+    Performs MPI alltoallv operation.
+
+    Alltoallv is a generalized all-to-all communication operation where each process
+    sends different amounts of data to each other process, and receives different
+    amounts of data from each other process.
+
+    Args:
+        sendbuf: Tensor containing data to send to all processes
+        sendcounts: 1D Tensor of length world_size, specifying the number of elements
+                    to send to each process (sendcounts[j] = number of elements to send to process j)
+        sdispls: 1D Tensor of length world_size, specifying the displacement (in elements)
+                 from the start of sendbuf for data to send to each process
+        recvcounts: 1D Tensor of length world_size, specifying the number of elements
+                    to receive from each process (recvcounts[j] = number of elements to receive from process j)
+        rdispls: 1D Tensor of length world_size, specifying the displacement (in elements)
+                 from the start of recvbuf for data to receive from each process
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+
+    Returns:
+        Tensor containing the received data from all processes
+    """
+    _alltoallv_check(sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+    return torch.ops.torch_mpi_ext.alltoallv.default(sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+
+
+def alltoallv_out(
+    recvbuf: Tensor,
+    sendbuf: Tensor,
+    sendcounts: Tensor,
+    sdispls: Tensor,
+    recvcounts: Tensor,
+    rdispls: Tensor,
+    comm_ptr: int,
+) -> None:
+    """
+    Performs MPI alltoallv operation in-place.
+
+    Alltoallv is a generalized all-to-all communication operation where each process
+    sends different amounts of data to each other process, and receives different
+    amounts of data from each other process.
+
+    This in-place version writes the result directly to a pre-allocated recvbuf tensor.
+
+    Args:
+        recvbuf: Pre-allocated tensor to write the received data to
+        sendbuf: Tensor containing data to send to all processes
+        sendcounts: 1D Tensor of length world_size, specifying the number of elements
+                    to send to each process
+        sdispls: 1D Tensor of length world_size, specifying the displacement (in elements)
+                 from the start of sendbuf for data to send to each process
+        recvcounts: 1D Tensor of length world_size, specifying the number of elements
+                    to receive from each process
+        rdispls: 1D Tensor of length world_size, specifying the displacement (in elements)
+                 from the start of recvbuf for data to receive from each process
+        comm_ptr: MPI communicator handle obtained from comm.py2f()
+
+    Returns:
+        None (result is written to recvbuf in-place)
+    """
+    _alltoallv_out_check(recvbuf, sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+    return torch.ops.torch_mpi_ext.alltoallv_out.default(recvbuf, sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+
+
+def _alltoall_check(sendbuf: Tensor, comm_ptr: int) -> None:
+    """Check function for alltoall - validates inputs"""
+    torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
+    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
+
+
+def _alltoall_out_check(recvbuf: Tensor, sendbuf: Tensor, comm_ptr: int) -> None:
+    """Check function for alltoall_out - validates inputs"""
+    torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
+    torch._check(recvbuf.device.type == "cpu", "recvbuf must be on CPU")
+    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
+    torch._check(recvbuf.numel() == sendbuf.numel(), "recvbuf must have same size as sendbuf")
+
+
+def _alltoallv_check(
+    sendbuf: Tensor,
+    sendcounts: Tensor,
+    sdispls: Tensor,
+    recvcounts: Tensor,
+    rdispls: Tensor,
+    comm_ptr: int,
+) -> None:
+    """Check function for alltoallv - validates inputs"""
+    torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
+    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
+    torch._check(sendcounts.device.type == "cpu", "sendcounts must be on CPU")
+    torch._check(sdispls.device.type == "cpu", "sdispls must be on CPU")
+    torch._check(recvcounts.device.type == "cpu", "recvcounts must be on CPU")
+    torch._check(rdispls.device.type == "cpu", "rdispls must be on CPU")
+    torch._check(sendcounts.ndim == 1, "sendcounts must be 1-dimensional")
+    torch._check(sdispls.ndim == 1, "sdispls must be 1-dimensional")
+    torch._check(recvcounts.ndim == 1, "recvcounts must be 1-dimensional")
+    torch._check(rdispls.ndim == 1, "rdispls must be 1-dimensional")
+    torch._check(sendcounts.numel() == sdispls.numel(), "sendcounts and sdispls must have same length")
+    torch._check(recvcounts.numel() == rdispls.numel(), "recvcounts and rdispls must have same length")
+
+
+def _alltoallv_out_check(
+    recvbuf: Tensor,
+    sendbuf: Tensor,
+    sendcounts: Tensor,
+    sdispls: Tensor,
+    recvcounts: Tensor,
+    rdispls: Tensor,
+    comm_ptr: int,
+) -> None:
+    """Check function for alltoallv_out - validates inputs"""
+    torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
+    torch._check(recvbuf.device.type == "cpu", "recvbuf must be on CPU")
+    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
+    torch._check(sendcounts.device.type == "cpu", "sendcounts must be on CPU")
+    torch._check(sdispls.device.type == "cpu", "sdispls must be on CPU")
+    torch._check(recvcounts.device.type == "cpu", "recvcounts must be on CPU")
+    torch._check(rdispls.device.type == "cpu", "rdispls must be on CPU")
+    torch._check(sendcounts.ndim == 1, "sendcounts must be 1-dimensional")
+    torch._check(sdispls.ndim == 1, "sdispls must be 1-dimensional")
+    torch._check(recvcounts.ndim == 1, "recvcounts must be 1-dimensional")
+    torch._check(rdispls.ndim == 1, "rdispls must be 1-dimensional")
+    torch._check(sendcounts.numel() == sdispls.numel(), "sendcounts and sdispls must have same length")
+    torch._check(recvcounts.numel() == rdispls.numel(), "recvcounts and rdispls must have same length")
+
+
 @torch.library.register_fake("torch_mpi_ext::all_reduce_")
 def _(input: Tensor, comm_ptr):
     torch._check(isinstance(comm_ptr, int))
@@ -158,3 +340,29 @@ def _(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1):
     torch._check(output.size(dim) % input.size(dim) == 0)
     
     # This is an out-of-place operation that writes to output tensor
+
+
+@torch.library.register_fake("torch_mpi_ext::alltoallv")
+def _fake_alltoallv(sendbuf: Tensor, sendcounts: Tensor, sdispls: Tensor,
+                    recvcounts: Tensor, rdispls: Tensor, comm_ptr: int) -> Tensor:
+    """FakeTensor kernel for alltoallv"""
+    _alltoallv_check(sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+    # Calculate total receive count
+    total_recv = int(recvcounts.sum().item())
+    return torch.empty((total_recv,), dtype=sendbuf.dtype)
+
+
+@torch.library.register_fake("torch_mpi_ext::alltoallv_out")
+def _fake_alltoallv_out(recvbuf: Tensor, sendbuf: Tensor, sendcounts: Tensor,
+                        sdispls: Tensor, recvcounts: Tensor, rdispls: Tensor,
+                        comm_ptr: int) -> None:
+    """FakeTensor kernel for alltoallv_out"""
+    _alltoallv_out_check(recvbuf, sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
+    # In-place operation returns None
+
+
+@torch.library.register_fake("torch_mpi_ext::alltoall_out")
+def _fake_alltoall_out(recvbuf: Tensor, sendbuf: Tensor, comm_ptr: int) -> None:
+    """FakeTensor kernel for alltoall_out"""
+    _alltoall_out_check(recvbuf, sendbuf, comm_ptr)
+    # In-place operation returns None
