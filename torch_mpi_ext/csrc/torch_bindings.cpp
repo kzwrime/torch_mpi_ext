@@ -24,6 +24,17 @@ void alltoallv_out(at::Tensor& recvbuf, const at::Tensor& sendbuf,
 void alltoall_out(at::Tensor& recvbuf, const at::Tensor& sendbuf,
                   long comm_ptr);
 
+// Wrapper functions that accept comm_ptr_wrapper (Tensor)
+void all_reduce__wrapper(at::Tensor& input, const at::Tensor& comm_ptr_wrapper);
+at::Tensor all_reduce_wrapper(const at::Tensor& input,
+                              const at::Tensor& comm_ptr_wrapper);
+at::Tensor all_gather_into_tensor_wrapper(const at::Tensor& input,
+                                         const at::Tensor& comm_ptr_wrapper,
+                                         int64_t dim);
+void all_gather_into_tensor_out_wrapper(at::Tensor& output, const at::Tensor& input,
+                                        const at::Tensor& comm_ptr_wrapper,
+                                        int64_t dim);
+
 extern "C" {
 /* Creates a dummy empty _C module that can be imported from Python.
    The import from Python will load the .so consisting of this file
@@ -64,6 +75,14 @@ TORCH_LIBRARY(torch_mpi_ext, m) {
       "alltoallv_out(Tensor(a!) recvbuf, Tensor sendbuf, Tensor sendcounts, "
       "Tensor sdispls, Tensor recvcounts, Tensor rdispls, int comm_ptr) -> ()");
   m.def("alltoall_out(Tensor(a!) recvbuf, Tensor sendbuf, int comm_ptr) -> ()");
+  m.def("all_reduce__wrapper(Tensor(a!) input, Tensor comm_ptr_wrapper) -> ()");
+  m.def("all_reduce_wrapper(Tensor input, Tensor comm_ptr_wrapper) -> Tensor");
+  m.def(
+      "all_gather_into_tensor_wrapper(Tensor input, Tensor comm_ptr_wrapper, int dim = -1) -> "
+      "Tensor");
+  m.def(
+      "all_gather_into_tensor_out_wrapper(Tensor(a!) output, Tensor input, Tensor "
+      "comm_ptr_wrapper, int dim = -1) -> ()");
 }
 
 // Registers CPU implementations for mymuladd, mymul, myadd_out
@@ -78,6 +97,10 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, CPU, m) {
   m.impl("alltoallv", &alltoallv);
   m.impl("alltoallv_out", &alltoallv_out);
   m.impl("alltoall_out", &alltoall_out);
+  m.impl("all_reduce__wrapper", &all_reduce__wrapper);
+  m.impl("all_reduce_wrapper", &all_reduce_wrapper);
+  m.impl("all_gather_into_tensor_wrapper", &all_gather_into_tensor_wrapper);
+  m.impl("all_gather_into_tensor_out_wrapper", &all_gather_into_tensor_out_wrapper);
 }
 
 }  // namespace torch_mpi_ext

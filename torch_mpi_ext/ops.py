@@ -1,7 +1,9 @@
 import torch
 from torch import Tensor
 
-__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_gather_into_tensor", 
+__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_reduce_", "all_reduce_wrapper",
+           "all_reduce__wrapper", "all_gather_into_tensor", "all_gather_into_tensor_wrapper",
+           "all_gather_into_tensor_out", "all_gather_into_tensor_out_wrapper",
            "alltoall", "alltoall_out", "alltoallv", "alltoallv_out"]
 
 
@@ -92,6 +94,40 @@ def all_reduce(input: Tensor, comm_ptr: int) -> Tensor:
     return torch.ops.torch_mpi_ext.all_reduce.default(input, comm_ptr)
 
 
+def all_reduce__wrapper(input: Tensor, comm_ptr_wrapper: Tensor):
+    """
+    Performs MPI allreduce operation on the input tensor in-place.
+
+    Wrapper function that accepts comm_ptr_wrapper (Tensor) and calls
+    the C++ wrapper function which extracts comm_ptr and calls the original function.
+
+    Args:
+        input: Input tensor to reduce (will be modified in-place)
+        comm_ptr_wrapper: MPI communicator handle wrapped in a tensor [1]
+
+    Returns:
+        Reduced tensor (same tensor as input)
+    """
+    return torch.ops.torch_mpi_ext.all_reduce__wrapper.default(input, comm_ptr_wrapper)
+
+
+def all_reduce_wrapper(input: Tensor, comm_ptr_wrapper: Tensor) -> Tensor:
+    """
+    Performs MPI allreduce operation on the input tensor.
+
+    Wrapper function that accepts comm_ptr_wrapper (Tensor) and calls
+    the C++ wrapper function which extracts comm_ptr and calls the original function.
+
+    Args:
+        input: Input tensor to reduce
+        comm_ptr_wrapper: MPI communicator handle wrapped in a tensor [1]
+
+    Returns:
+        Reduced tensor with same shape as input
+    """
+    return torch.ops.torch_mpi_ext.all_reduce_wrapper.default(input, comm_ptr_wrapper)
+
+
 def all_gather_into_tensor(input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
     """
     Performs MPI allgather operation on the input tensor.
@@ -121,6 +157,43 @@ def all_gather_into_tensor_out(output: Tensor, input: Tensor, comm_ptr: int, dim
         Same output tensor with gathered values written to it
     """
     return torch.ops.torch_mpi_ext.all_gather_into_tensor_out.default(output, input, comm_ptr, dim)
+
+
+def all_gather_into_tensor_wrapper(input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1) -> Tensor:
+    """
+    Performs MPI allgather operation on the input tensor.
+
+    Wrapper function that accepts comm_ptr_wrapper (Tensor) and calls
+    the C++ wrapper function which extracts comm_ptr and calls the original function.
+
+    Args:
+        input: Input tensor to gather
+        comm_ptr_wrapper: MPI communicator handle wrapped in a tensor [1]
+        dim: Dimension along which to concatenate the gathered tensors
+
+    Returns:
+        Gathered tensor with specified dimension scaled by world size
+    """
+    return torch.ops.torch_mpi_ext.all_gather_into_tensor_wrapper.default(input, comm_ptr_wrapper, dim)
+
+
+def all_gather_into_tensor_out_wrapper(output: Tensor, input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1) -> Tensor:
+    """
+    Performs MPI allgather operation on the input tensor and writes the result directly to the output tensor.
+
+    Wrapper function that accepts comm_ptr_wrapper (Tensor) and calls
+    the C++ wrapper function which extracts comm_ptr and calls the original function.
+
+    Args:
+        output: Output tensor to write the gathered result to
+        input: Input tensor to gather
+        comm_ptr_wrapper: MPI communicator handle wrapped in a tensor [1]
+        dim: Dimension along which to concatenate the gathered tensors
+
+    Returns:
+        Same output tensor with gathered values written to it
+    """
+    return torch.ops.torch_mpi_ext.all_gather_into_tensor_out_wrapper.default(output, input, comm_ptr_wrapper, dim)
 
 
 def alltoall(sendbuf: Tensor, comm_ptr: int) -> Tensor:
@@ -324,21 +397,84 @@ def _(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1):
     torch._check(isinstance(comm_ptr, int))
     torch._check(input.device.type == "cpu")
     torch._check(output.device.type == "cpu")
-    
+
     # Normalize negative dim values
     ndim = input.ndim
     torch._check(dim >= -ndim and dim < ndim)
     if dim < 0:
         dim = dim + ndim
-    
+
     # Check that shapes match in all dimensions except dim
     for i in range(ndim):
         if i != dim:
             torch._check(input.size(i) == output.size(i))
-    
+
     # Check that output size at dim is a multiple of input size at dim
     torch._check(output.size(dim) % input.size(dim) == 0)
-    
+
+    # This is an out-of-place operation that writes to output tensor
+
+
+@torch.library.register_fake("torch_mpi_ext::all_reduce__wrapper")
+def _(input: Tensor, comm_ptr_wrapper: Tensor):
+    torch._check(comm_ptr_wrapper.ndim == 1)
+    torch._check(comm_ptr_wrapper.size(0) == 1)
+    torch._check(comm_ptr_wrapper.dtype == torch.int64)
+    torch._check(input.device.type == "cpu")
+    # In-place operation returns the same tensor
+    return
+
+
+@torch.library.register_fake("torch_mpi_ext::all_reduce_wrapper")
+def _(input: Tensor, comm_ptr_wrapper: Tensor):
+    torch._check(comm_ptr_wrapper.ndim == 1)
+    torch._check(comm_ptr_wrapper.size(0) == 1)
+    torch._check(comm_ptr_wrapper.dtype == torch.int64)
+    torch._check(input.device.type == "cpu")
+    return torch.empty_like(input)
+
+
+@torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor_wrapper")
+def _(input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1):
+    torch._check(comm_ptr_wrapper.ndim == 1)
+    torch._check(comm_ptr_wrapper.size(0) == 1)
+    torch._check(comm_ptr_wrapper.dtype == torch.int64)
+    torch._check(input.device.type == "cpu")
+
+    # Normalize negative dim values
+    ndim = input.ndim
+    torch._check(dim >= -ndim and dim < ndim)
+    if dim < 0:
+        dim = dim + ndim
+
+    # Calculate output shape
+    output_size = list(input.size())
+    output_size[dim] = output_size[dim] * 2  # Placeholder for world_size
+    return torch.empty(output_size, dtype=input.dtype)
+
+
+@torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor_out_wrapper")
+def _(output: Tensor, input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1):
+    torch._check(comm_ptr_wrapper.ndim == 1)
+    torch._check(comm_ptr_wrapper.size(0) == 1)
+    torch._check(comm_ptr_wrapper.dtype == torch.int64)
+    torch._check(input.device.type == "cpu")
+    torch._check(output.device.type == "cpu")
+
+    # Normalize negative dim values
+    ndim = input.ndim
+    torch._check(dim >= -ndim and dim < ndim)
+    if dim < 0:
+        dim = dim + ndim
+
+    # Check that shapes match in all dimensions except dim
+    for i in range(ndim):
+        if i != dim:
+            torch._check(input.size(i) == output.size(i))
+
+    # Check that output size at dim is a multiple of input size at dim
+    torch._check(output.size(dim) % input.size(dim) == 0)
+
     # This is an out-of-place operation that writes to output tensor
 
 

@@ -351,3 +351,63 @@ void alltoall_out(at::Tensor& recvbuf, const at::Tensor& sendbuf_,
 
   TORCH_CHECK(result == MPI_SUCCESS, "MPI_Alltoall failed");
 }
+
+// =============================================================================
+// Wrapper functions that accept comm_ptr_wrapper (Tensor)
+// These extract the comm_ptr from the tensor and call the original functions
+// =============================================================================
+
+// Wrapper for all_reduce_ (in-place)
+void all_reduce__wrapper(at::Tensor& input,
+                         const at::Tensor& comm_ptr_wrapper) {
+  TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
+                  comm_ptr_wrapper.size(0) == 1,
+              "comm_ptr_wrapper must be a 1-element tensor");
+  TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
+              "comm_ptr_wrapper must be int64 dtype");
+  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+
+  all_reduce_(input, (long)comm_ptr);
+}
+
+// Wrapper for all_reduce (out-of-place)
+at::Tensor all_reduce_wrapper(const at::Tensor& input,
+                              const at::Tensor& comm_ptr_wrapper) {
+  TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
+                  comm_ptr_wrapper.size(0) == 1,
+              "comm_ptr_wrapper must be a 1-element tensor");
+  TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
+              "comm_ptr_wrapper must be int64 dtype");
+  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+
+  return all_reduce(input, (long)comm_ptr);
+}
+
+// Wrapper for all_gather_into_tensor
+at::Tensor all_gather_into_tensor_wrapper(const at::Tensor& input,
+                                         const at::Tensor& comm_ptr_wrapper,
+                                         int64_t dim) {
+  TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
+                  comm_ptr_wrapper.size(0) == 1,
+              "comm_ptr_wrapper must be a 1-element tensor");
+  TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
+              "comm_ptr_wrapper must be int64 dtype");
+  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+
+  return all_gather_into_tensor(input, (long)comm_ptr, dim);
+}
+
+// Wrapper for all_gather_into_tensor_out
+void all_gather_into_tensor_out_wrapper(at::Tensor& output,
+                                        const at::Tensor& input,
+                                        const at::Tensor& comm_ptr_wrapper,
+                                        int64_t dim) {
+  TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
+                  comm_ptr_wrapper.size(0) == 1,
+              "comm_ptr_wrapper must be a 1-element tensor");
+  TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
+              "comm_ptr_wrapper must be int64 dtype");
+  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+
+  all_gather_into_tensor_out(output, input, (long)comm_ptr, dim);
+}
