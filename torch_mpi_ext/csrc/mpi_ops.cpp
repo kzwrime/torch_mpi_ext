@@ -71,8 +71,7 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
                                c_comm                  // communicator
     );
     TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
-    at::native::copy_(input, input_fp32);
-
+    input.copy_(input_fp32);
   } else {
     auto datatype = get_mpi_cal_datatype(input);
 

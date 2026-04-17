@@ -318,14 +318,12 @@ def alltoallv_out(
 def _alltoall_check(sendbuf: Tensor, comm_ptr: int) -> None:
     """Check function for alltoall - validates inputs"""
     torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
-    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
 
 
 def _alltoall_out_check(recvbuf: Tensor, sendbuf: Tensor, comm_ptr: int) -> None:
     """Check function for alltoall_out - validates inputs"""
     torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
-    torch._check(recvbuf.device.type == "cpu", "recvbuf must be on CPU")
-    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
+    torch._check(recvbuf.device.type == sendbuf.device.type, "recvbuf must be on the same device as sendbuf")
     torch._check(recvbuf.numel() == sendbuf.numel(), "recvbuf must have same size as sendbuf")
 
 
@@ -339,11 +337,12 @@ def _alltoallv_check(
 ) -> None:
     """Check function for alltoallv - validates inputs"""
     torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
-    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
-    torch._check(sendcounts.device.type == "cpu", "sendcounts must be on CPU")
-    torch._check(sdispls.device.type == "cpu", "sdispls must be on CPU")
-    torch._check(recvcounts.device.type == "cpu", "recvcounts must be on CPU")
-    torch._check(rdispls.device.type == "cpu", "rdispls must be on CPU")
+    device_type = sendbuf.device.type
+    torch._check(sendbuf.device.type == device_type, "sendbuf must be on the same device as other tensors")
+    torch._check(sendcounts.device.type == device_type, "sendcounts must be on the same device as other tensors")
+    torch._check(sdispls.device.type == device_type, "sdispls must be on the same device as other tensors")
+    torch._check(recvcounts.device.type == device_type, "recvcounts must be on the same device as other tensors")
+    torch._check(rdispls.device.type == device_type, "rdispls must be on the same device as other tensors")
     torch._check(sendcounts.ndim == 1, "sendcounts must be 1-dimensional")
     torch._check(sdispls.ndim == 1, "sdispls must be 1-dimensional")
     torch._check(recvcounts.ndim == 1, "recvcounts must be 1-dimensional")
@@ -363,12 +362,13 @@ def _alltoallv_out_check(
 ) -> None:
     """Check function for alltoallv_out - validates inputs"""
     torch._check(isinstance(comm_ptr, int), "comm_ptr must be an integer")
-    torch._check(recvbuf.device.type == "cpu", "recvbuf must be on CPU")
-    torch._check(sendbuf.device.type == "cpu", "sendbuf must be on CPU")
-    torch._check(sendcounts.device.type == "cpu", "sendcounts must be on CPU")
-    torch._check(sdispls.device.type == "cpu", "sdispls must be on CPU")
-    torch._check(recvcounts.device.type == "cpu", "recvcounts must be on CPU")
-    torch._check(rdispls.device.type == "cpu", "rdispls must be on CPU")
+    device_type = sendbuf.device.type
+    torch._check(recvbuf.device.type == device_type, "recvbuf must be on the same device as sendbuf")
+    torch._check(sendbuf.device.type == device_type, "sendbuf must be on the same device as recvbuf")
+    torch._check(sendcounts.device.type == device_type, "sendcounts must be on the same device as sendbuf")
+    torch._check(sdispls.device.type == device_type, "sdispls must be on the same device as sendbuf")
+    torch._check(recvcounts.device.type == device_type, "recvcounts must be on the same device as sendbuf")
+    torch._check(rdispls.device.type == device_type, "rdispls must be on the same device as other tensors")
     torch._check(sendcounts.ndim == 1, "sendcounts must be 1-dimensional")
     torch._check(sdispls.ndim == 1, "sdispls must be 1-dimensional")
     torch._check(recvcounts.ndim == 1, "recvcounts must be 1-dimensional")
@@ -380,7 +380,6 @@ def _alltoallv_out_check(
 @torch.library.register_fake("torch_mpi_ext::all_reduce_")
 def _(input: Tensor, comm_ptr):
     torch._check(isinstance(comm_ptr, int))
-    torch._check(input.device.type == "cpu")
     # In-place operation returns the same tensor
     return
 
@@ -388,15 +387,13 @@ def _(input: Tensor, comm_ptr):
 @torch.library.register_fake("torch_mpi_ext::all_reduce")
 def _(input: Tensor, comm_ptr):
     torch._check(isinstance(comm_ptr, int))
-    torch._check(input.device.type == "cpu")
     return torch.empty_like(input)
 
 
 @torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor_out")
 def _(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1):
     torch._check(isinstance(comm_ptr, int))
-    torch._check(input.device.type == "cpu")
-    torch._check(output.device.type == "cpu")
+    torch._check(input.device.type == output.device.type)
 
     # Normalize negative dim values
     ndim = input.ndim
@@ -420,7 +417,6 @@ def _(input: Tensor, comm_ptr_wrapper: Tensor):
     torch._check(comm_ptr_wrapper.ndim == 1)
     torch._check(comm_ptr_wrapper.size(0) == 1)
     torch._check(comm_ptr_wrapper.dtype == torch.int64)
-    torch._check(input.device.type == "cpu")
     # In-place operation returns the same tensor
     return
 
@@ -430,7 +426,6 @@ def _(input: Tensor, comm_ptr_wrapper: Tensor):
     torch._check(comm_ptr_wrapper.ndim == 1)
     torch._check(comm_ptr_wrapper.size(0) == 1)
     torch._check(comm_ptr_wrapper.dtype == torch.int64)
-    torch._check(input.device.type == "cpu")
     return torch.empty_like(input)
 
 
@@ -439,7 +434,6 @@ def _(input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1):
     torch._check(comm_ptr_wrapper.ndim == 1)
     torch._check(comm_ptr_wrapper.size(0) == 1)
     torch._check(comm_ptr_wrapper.dtype == torch.int64)
-    torch._check(input.device.type == "cpu")
 
     # Normalize negative dim values
     ndim = input.ndim
@@ -450,7 +444,7 @@ def _(input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1):
     # Calculate output shape
     output_size = list(input.size())
     output_size[dim] = output_size[dim] * 2  # Placeholder for world_size
-    return torch.empty(output_size, dtype=input.dtype)
+    return torch.empty(output_size, dtype=input.dtype, device=input.device)
 
 
 @torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor_out_wrapper")
@@ -458,8 +452,7 @@ def _(output: Tensor, input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1):
     torch._check(comm_ptr_wrapper.ndim == 1)
     torch._check(comm_ptr_wrapper.size(0) == 1)
     torch._check(comm_ptr_wrapper.dtype == torch.int64)
-    torch._check(input.device.type == "cpu")
-    torch._check(output.device.type == "cpu")
+    torch._check(input.device.type == output.device.type)
 
     # Normalize negative dim values
     ndim = input.ndim
@@ -485,7 +478,7 @@ def _fake_alltoallv(sendbuf: Tensor, sendcounts: Tensor, sdispls: Tensor,
     _alltoallv_check(sendbuf, sendcounts, sdispls, recvcounts, rdispls, comm_ptr)
     # Calculate total receive count
     total_recv = int(recvcounts.sum().item())
-    return torch.empty((total_recv,), dtype=sendbuf.dtype)
+    return torch.empty((total_recv,), dtype=sendbuf.dtype, device=sendbuf.device)
 
 
 @torch.library.register_fake("torch_mpi_ext::alltoallv_out")
