@@ -103,4 +103,21 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, CPU, m) {
   m.impl("all_gather_into_tensor_out_wrapper", &all_gather_into_tensor_out_wrapper);
 }
 
+TORCH_LIBRARY_IMPL(torch_mpi_ext, PrivateUse1, m) {
+  m.impl("mymuladd", &mymuladd_cpu);
+  m.impl("mymul", &mymul_cpu);
+  m.impl("myadd_out", &myadd_out_cpu);
+  m.impl("all_reduce_", &all_reduce_);
+  m.impl("all_reduce", &all_reduce);
+  m.impl("all_gather_into_tensor", &all_gather_into_tensor);
+  m.impl("all_gather_into_tensor_out", &all_gather_into_tensor_out);
+  m.impl("alltoallv", &alltoallv);
+  m.impl("alltoallv_out", &alltoallv_out);
+  m.impl("alltoall_out", &alltoall_out);
+  m.impl("all_reduce__wrapper", &all_reduce__wrapper);
+  m.impl("all_reduce_wrapper", &all_reduce_wrapper);
+  m.impl("all_gather_into_tensor_wrapper", &all_gather_into_tensor_wrapper);
+  m.impl("all_gather_into_tensor_out_wrapper", &all_gather_into_tensor_out_wrapper);
+}
+
 }  // namespace torch_mpi_ext
