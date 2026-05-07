@@ -76,10 +76,16 @@ def get_extensions():
         extra_link_args.extend(["-O0", "-g"])
 
     extensions_dir = os.path.join(this_dir, library_name, "csrc")
-    sources = list(glob.glob(os.path.join(extensions_dir, "*.cpp")))
+    sources = [
+        os.path.relpath(path, this_dir)
+        for path in glob.glob(os.path.join(extensions_dir, "*.cpp"))
+    ]
 
     extensions_cuda_dir = os.path.join(extensions_dir, "cuda")
-    cuda_sources = list(glob.glob(os.path.join(extensions_cuda_dir, "*.cu")))
+    cuda_sources = [
+        os.path.relpath(path, this_dir)
+        for path in glob.glob(os.path.join(extensions_cuda_dir, "*.cu"))
+    ]
 
     if use_cuda:
         sources += cuda_sources
