@@ -9,25 +9,25 @@
 extern "C" {
 #endif
 
-AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_myadd_out(
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_myadd_out(
     AtenTensorHandle a,
     AtenTensorHandle b,
     AtenTensorHandle out,
     [[maybe_unused]] void* output_args);
 
-AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_all_reduce_(
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_reduce_(
     AtenTensorHandle input,
     int64_t comm_ptr,
     [[maybe_unused]] void* output_args);
 
-AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_all_gather_into_tensor_out(
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out(
     AtenTensorHandle output,
     AtenTensorHandle input,
     int64_t comm_ptr,
     int64_t dim,
     [[maybe_unused]] void* output_args);
 
-AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_alltoallv_out(
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_alltoallv_out(
     AtenTensorHandle recvbuf,
     AtenTensorHandle sendbuf,
     AtenTensorHandle sendcounts,
@@ -37,18 +37,18 @@ AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_alltoallv_out(
     int64_t comm_ptr,
     [[maybe_unused]] void* output_args);
 
-AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_alltoall_out(
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_alltoall_out(
     AtenTensorHandle recvbuf,
     AtenTensorHandle sendbuf,
     int64_t comm_ptr,
     [[maybe_unused]] void* output_args);
 
-AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_all_reduce__wrapper(
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_reduce__wrapper(
     AtenTensorHandle input,
     AtenTensorHandle comm_ptr_wrapper,
     [[maybe_unused]] void* output_args);
 
-AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mpi_ext_all_gather_into_tensor_out_wrapper(
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out_wrapper(
     AtenTensorHandle output,
     AtenTensorHandle input,
     AtenTensorHandle comm_ptr_wrapper,
