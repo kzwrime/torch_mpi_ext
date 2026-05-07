@@ -6,6 +6,8 @@
 import os
 import torch
 import glob
+import subprocess
+import sys
 
 from setuptools import find_packages, setup
 
@@ -17,6 +19,30 @@ from torch.utils.cpp_extension import (
 )
 
 library_name = "torch_mpi_ext"
+
+this_dir = os.path.dirname(os.path.abspath(__file__))
+
+
+def should_generate_aoti_wrappers() -> bool:
+    build_commands = {
+        "bdist_wheel",
+        "build",
+        "build_ext",
+        "develop",
+        "editable_wheel",
+        "install",
+    }
+    return any(command in build_commands for command in sys.argv[1:])
+
+
+def generate_aoti_wrappers() -> None:
+    script = os.path.join(this_dir, "scripts", "generate_aoti_wrappers.py")
+    print(f"Generating AOTI wrappers: {script}")
+    subprocess.check_call([sys.executable, script], cwd=this_dir)
+
+
+if should_generate_aoti_wrappers():
+    generate_aoti_wrappers()
 
 if torch.__version__ >= "2.6.0":
     py_limited_api = True
@@ -49,7 +75,6 @@ def get_extensions():
         extra_compile_args["nvcc"].append("-g")
         extra_link_args.extend(["-O0", "-g"])
 
-    this_dir = os.path.dirname(os.path.abspath(__file__))
     extensions_dir = os.path.join(this_dir, library_name, "csrc")
     sources = list(glob.glob(os.path.join(extensions_dir, "*.cpp")))
 
@@ -77,6 +102,14 @@ setup(
     name=library_name,
     version="0.0.1",
     packages=find_packages(),
+    package_data={
+        library_name: [
+            "include/*.h",
+            "include/*.hpp",
+            "include/*.txt",
+        ],
+    },
+    include_package_data=True,
     ext_modules=get_extensions(),
     install_requires=["torch"],
     description="Example of PyTorch C++ and CUDA extensions",
