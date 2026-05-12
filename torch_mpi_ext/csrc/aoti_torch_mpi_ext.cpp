@@ -5,6 +5,8 @@
 
 #include "torch_bindings.h"
 
+#include <ATen/record_function.h>
+
 #include <torch/csrc/inductor/aoti_torch/utils.h>
 
 using namespace torch::aot_inductor;
@@ -15,6 +17,7 @@ AOTITorchError aoti_torch_mcpu_myadd_out(
     AtenTensorHandle b,
     AtenTensorHandle out,
     [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_myadd_out", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     myadd_out_cpu(
         *tensor_handle_to_tensor_pointer(a),
@@ -27,6 +30,7 @@ AOTITorchError aoti_torch_mcpu_all_reduce_(
     AtenTensorHandle input,
     int64_t comm_ptr,
     [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_all_reduce_", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     all_reduce_(
         *tensor_handle_to_tensor_pointer(input),
@@ -40,6 +44,7 @@ AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out(
     int64_t comm_ptr,
     int64_t dim,
     [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_all_gather_into_tensor_out", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     all_gather_into_tensor_out(
         *tensor_handle_to_tensor_pointer(output),
@@ -58,6 +63,7 @@ AOTITorchError aoti_torch_mcpu_alltoallv_out(
     AtenTensorHandle rdispls,
     int64_t comm_ptr,
     [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_alltoallv_out", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     alltoallv_out(
         *tensor_handle_to_tensor_pointer(recvbuf),
@@ -75,6 +81,7 @@ AOTITorchError aoti_torch_mcpu_alltoall_out(
     AtenTensorHandle sendbuf,
     int64_t comm_ptr,
     [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_alltoall_out", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     alltoall_out(
         *tensor_handle_to_tensor_pointer(recvbuf),
@@ -87,6 +94,7 @@ AOTITorchError aoti_torch_mcpu_all_reduce__wrapper(
     AtenTensorHandle input,
     AtenTensorHandle comm_ptr_wrapper,
     [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_all_reduce__wrapper", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     all_reduce__wrapper(
         *tensor_handle_to_tensor_pointer(input),
@@ -100,6 +108,7 @@ AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out_wrapper(
     AtenTensorHandle comm_ptr_wrapper,
     int64_t dim,
     [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_all_gather_into_tensor_out_wrapper", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     all_gather_into_tensor_out_wrapper(
         *tensor_handle_to_tensor_pointer(output),

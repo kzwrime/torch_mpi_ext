@@ -179,6 +179,10 @@ def _supported(args: list[Arg], returns: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _wrapper_name(op: Op) -> str:
+    return f"aoti_torch_{AOTI_DEVICE}_{op.name}"
+
+
 def _collect_ops(sources: list[tuple[Path, str]]) -> tuple[list[Op], list[str]]:
     defs: dict[str, tuple[list[Arg], str, Path]] = {}
     impls: dict[str, tuple[str, Path]] = {}
@@ -206,7 +210,7 @@ def _collect_ops(sources: list[tuple[Path, str]]) -> tuple[list[Op], list[str]]:
 
 def _prototype(op: Op, *, trailing_semicolon: bool) -> str:
     prefix = "AOTI_TORCH_EXPORT AOTITorchError" if trailing_semicolon else "AOTITorchError"
-    lines = [f"{prefix} aoti_torch_{AOTI_DEVICE}_{op.name}("]
+    lines = [f"{prefix} {_wrapper_name(op)}("]
     params = [f"    {_c_type(arg)} {arg.name}" for arg in op.args]
     params.append("    [[maybe_unused]] void* output_args")
     for idx, param in enumerate(params):
@@ -239,12 +243,14 @@ def _generate_cpp(ops: list[Op]) -> str:
         GENERATED_HEADER,
         '#include "aoti_torch_mpi_ext.h"\n',
         '#include "torch_bindings.h"\n',
+        "#include <ATen/record_function.h>\n",
         "#include <torch/csrc/inductor/aoti_torch/utils.h>\n",
         "using namespace torch::aot_inductor;",
         f"using namespace {PACKAGE};\n",
     ]
     for op in ops:
         chunks.append(_prototype(op, trailing_semicolon=False) + " {")
+        chunks.append(f'  RECORD_FUNCTION("{_wrapper_name(op)}", {{}});')
         chunks.append("  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({")
         call_args = ",\n        ".join(_call_expr(arg) for arg in op.args)
         if call_args:
@@ -266,7 +272,7 @@ def _generate_op_list(ops: list[Op], skipped: list[str]) -> str:
         "",
     ]
     for op in ops:
-        lines.append(f"{op.name}\taoti_torch_{AOTI_DEVICE}_{op.name}\t{op.source}")
+        lines.append(f"{op.name}\t{_wrapper_name(op)}\t{op.source}")
     if skipped:
         lines.extend(["", f"Skipped operators: {len(skipped)}", ""])
         lines.extend(skipped)
