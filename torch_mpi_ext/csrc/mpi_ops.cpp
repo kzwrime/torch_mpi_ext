@@ -5,6 +5,7 @@
 
 #include <runtime/McpuKernelLaunch.h>
 
+#include <cstring>
 #include <vector>
 
 #include "mpi.h"
@@ -52,6 +53,38 @@ MPI_Datatype get_mpi_width_datatype(const at::Tensor& tensor) {
     TORCH_CHECK(false, "Unsupported tensor dtype for MPI operations");
   }
   return datatype;
+}
+
+void copy_allgather_intermediate_to_output(
+    const void* temp_ptr,
+    void* output_ptr,
+    int64_t comm_size,
+    int64_t outer,
+    int64_t dim_size,
+    int64_t inner,
+    int64_t element_size) {
+  const char* temp_bytes = static_cast<const char*>(temp_ptr);
+  char* output_bytes = static_cast<char*>(output_ptr);
+  int64_t input_numel = outer * dim_size * inner;
+  int64_t output_dim_size = comm_size * dim_size;
+
+  for (int64_t outer_idx = 0; outer_idx < outer; ++outer_idx) {
+    for (int64_t rank = 0; rank < comm_size; ++rank) {
+      for (int64_t dim_idx = 0; dim_idx < dim_size; ++dim_idx) {
+        int64_t src_offset =
+            ((rank * input_numel) + (outer_idx * dim_size + dim_idx) * inner) *
+            element_size;
+        int64_t dst_offset =
+            ((outer_idx * output_dim_size + rank * dim_size + dim_idx) *
+             inner) *
+            element_size;
+        std::memcpy(
+            output_bytes + dst_offset,
+            temp_bytes + src_offset,
+            inner * element_size);
+      }
+    }
+  }
 }
 
 // In-place all-reduce operation
@@ -169,26 +202,86 @@ at::Tensor all_gather_into_tensor(const at::Tensor& input_, long comm_ptr,
   for (size_t i = 0; i < input_sizes.size(); ++i) {
     intermediate_shape.push_back(input_sizes[i]);
   }
-  at::Tensor output = at::empty(intermediate_shape, input.options());
-
-  result = MPI_Allgather(input.data_ptr(),   // send buffer
-                         input.numel(),      // send count
-                         datatype,           // send datatype
-                         output.data_ptr(),  // receive buffer
-                         input.numel(),      // receive count
-                         datatype,           // receive datatype
-                         c_comm              // communicator
-  );
-
-  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
-
-  // Move the world_size dimension to the target dim
-  output = output.movedim(0, actual_dim);
-
-  // Reshape to final form
   std::vector<int64_t> final_shape(input_sizes.begin(), input_sizes.end());
   final_shape[actual_dim] = final_shape[actual_dim] * comm_size;
-  output = output.reshape(final_shape);
+  at::Tensor output = at::empty(final_shape, input.options());
+
+  if (input.device().type() == c10::DeviceType::PrivateUse1) {
+    at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
+
+    int64_t outer = 1;
+    for (int64_t i = 0; i < actual_dim; ++i) {
+      outer *= input_sizes[i];
+    }
+    int64_t dim_size = input_sizes[actual_dim];
+    int64_t inner = 1;
+    for (int64_t i = actual_dim + 1; i < input.dim(); ++i) {
+      inner *= input_sizes[i];
+    }
+
+    const void* input_ptr = input.data_ptr();
+    void* temp_ptr = temp_buffer.data_ptr();
+    void* output_ptr = output.data_ptr();
+    int64_t numel = input.numel();
+    int64_t element_size = input.element_size();
+
+    at::mcpu::launch_timed_kernel(
+        "mcpu::torch_mpi_ext::all_gather_into_tensor",
+        [input,
+         temp_buffer,
+         output,
+         input_ptr,
+         temp_ptr,
+         output_ptr,
+         numel,
+         datatype,
+         c_comm,
+         comm_size,
+         outer,
+         dim_size,
+         inner,
+         element_size](at::mcpu::kernel_timing::Event* timing_event) mutable {
+          MCPU_KERNEL_TIMING_SCOPE_EVENT(
+              "mcpu::torch_mpi_ext::all_gather_into_tensor", timing_event);
+          at::mcpu::KernelPointerMemoryGuard guard(
+              {input_ptr, temp_ptr, output_ptr});
+          int result = MPI_Allgather(input_ptr,  // send buffer
+                                     numel,      // send count
+                                     datatype,   // send datatype
+                                     temp_ptr,   // receive buffer
+                                     numel,      // receive count
+                                     datatype,   // receive datatype
+                                     c_comm      // communicator
+          );
+          TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
+          copy_allgather_intermediate_to_output(
+              temp_ptr,
+              output_ptr,
+              comm_size,
+              outer,
+              dim_size,
+              inner,
+              element_size);
+        });
+  } else {
+    at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
+
+    result = MPI_Allgather(input.data_ptr(),        // send buffer
+                           input.numel(),           // send count
+                           datatype,                // send datatype
+                           temp_buffer.data_ptr(),  // receive buffer
+                           input.numel(),           // receive count
+                           datatype,                // receive datatype
+                           c_comm                   // communicator
+    );
+
+    TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
+
+    // Move the world_size dimension to the target dim
+    temp_buffer = temp_buffer.movedim(0, actual_dim);
+
+    output.copy_(temp_buffer.reshape(final_shape));
+  }
 
   TORCH_CHECK(output.is_contiguous(), "tensor must be contiguous");
 
@@ -237,22 +330,79 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
   // in the first 2 dimensions Then we use MPI_Allgather to fill it
   at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
 
-  result = MPI_Allgather(input.data_ptr(),        // send buffer
-                         input.numel(),           // send count
-                         datatype,                // send datatype
-                         temp_buffer.data_ptr(),  // receive buffer
-                         input.numel(),           // receive count
-                         datatype,                // receive datatype
-                         c_comm                   // communicator
-  );
+  if (input.device().type() == c10::DeviceType::PrivateUse1) {
+    int64_t outer = 1;
+    for (int64_t i = 0; i < actual_dim; ++i) {
+      outer *= input_sizes[i];
+    }
+    int64_t dim_size = input_sizes[actual_dim];
+    int64_t inner = 1;
+    for (int64_t i = actual_dim + 1; i < input.dim(); ++i) {
+      inner *= input_sizes[i];
+    }
 
-  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
+    const void* input_ptr = input.data_ptr();
+    void* temp_ptr = temp_buffer.data_ptr();
+    void* output_ptr = output.data_ptr();
+    int64_t numel = input.numel();
+    int64_t element_size = input.element_size();
 
-  // Move the world_size dimension to the target dim
-  temp_buffer = temp_buffer.movedim(0, actual_dim);
+    at::mcpu::launch_timed_kernel(
+        "mcpu::torch_mpi_ext::all_gather_into_tensor_out",
+        [input,
+         temp_buffer,
+         output,
+         input_ptr,
+         temp_ptr,
+         output_ptr,
+         numel,
+         datatype,
+         c_comm,
+         comm_size,
+         outer,
+         dim_size,
+         inner,
+         element_size](at::mcpu::kernel_timing::Event* timing_event) mutable {
+          MCPU_KERNEL_TIMING_SCOPE_EVENT(
+              "mcpu::torch_mpi_ext::all_gather_into_tensor_out", timing_event);
+          at::mcpu::KernelPointerMemoryGuard guard(
+              {input_ptr, temp_ptr, output_ptr});
+          int result = MPI_Allgather(input_ptr,  // send buffer
+                                     numel,      // send count
+                                     datatype,   // send datatype
+                                     temp_ptr,   // receive buffer
+                                     numel,      // receive count
+                                     datatype,   // receive datatype
+                                     c_comm      // communicator
+          );
+          TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
+          copy_allgather_intermediate_to_output(
+              temp_ptr,
+              output_ptr,
+              comm_size,
+              outer,
+              dim_size,
+              inner,
+              element_size);
+        });
+  } else {
+    result = MPI_Allgather(input.data_ptr(),        // send buffer
+                           input.numel(),           // send count
+                           datatype,                // send datatype
+                           temp_buffer.data_ptr(),  // receive buffer
+                           input.numel(),           // receive count
+                           datatype,                // receive datatype
+                           c_comm                   // communicator
+    );
 
-  // Copy the result to the output tensor
-  output.copy_(temp_buffer.reshape(expected_shape));
+    TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
+
+    // Move the world_size dimension to the target dim
+    temp_buffer = temp_buffer.movedim(0, actual_dim);
+
+    // Copy the result to the output tensor
+    output.copy_(temp_buffer.reshape(expected_shape));
+  }
 
   TORCH_CHECK(output.is_contiguous(), "tensor must be contiguous");
 
@@ -429,16 +579,11 @@ at::Tensor all_reduce_wrapper(const at::Tensor& input,
 
 // Wrapper for all_gather_into_tensor
 at::Tensor all_gather_into_tensor_wrapper(const at::Tensor& input,
-                                         const at::Tensor& comm_ptr_wrapper,
-                                         int64_t dim) {
-  TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
-                  comm_ptr_wrapper.size(0) == 1,
-              "comm_ptr_wrapper must be a 1-element tensor");
-  TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
-              "comm_ptr_wrapper must be int64 dtype");
-  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+                                          const at::Tensor& comm_ptr_wrapper,
+                                          int64_t dim) {
+  long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
 
-  return all_gather_into_tensor(input, (long)comm_ptr, dim);
+  return all_gather_into_tensor(input, comm_ptr, dim);
 }
 
 // Wrapper for all_gather_into_tensor_out
@@ -446,12 +591,7 @@ void all_gather_into_tensor_out_wrapper(at::Tensor& output,
                                         const at::Tensor& input,
                                         const at::Tensor& comm_ptr_wrapper,
                                         int64_t dim) {
-  TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
-                  comm_ptr_wrapper.size(0) == 1,
-              "comm_ptr_wrapper must be a 1-element tensor");
-  TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
-              "comm_ptr_wrapper must be int64 dtype");
-  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+  long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
 
-  all_gather_into_tensor_out(output, input, (long)comm_ptr, dim);
+  all_gather_into_tensor_out(output, input, comm_ptr, dim);
 }

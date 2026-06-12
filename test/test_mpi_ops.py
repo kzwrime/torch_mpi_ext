@@ -120,6 +120,7 @@ class TestMPIOperations(TestCase):
 
                     # Perform all-gather on dim=-2 (should be same as dim=1)
                     result = torch_mpi_ext.ops.all_gather_into_tensor(tensor, comm_ptr=self.comm_ptr, dim=dim)
+                    _synchronize_accelerator_if_needed()
 
                     expected_shape = [2, 3, 4]
                     expected_shape[dim] *= self.size
@@ -171,6 +172,7 @@ class TestMPIOperations(TestCase):
         tensor = tensor * (self.rank + 1)  # Rank-specific values
         
         result = torch_mpi_ext.ops.all_gather_into_tensor(tensor, self.comm_ptr, dim=0)
+        _synchronize_accelerator_if_needed()
         
         # Expected: concatenated results from all ranks along dim=0
         expected_parts = []
@@ -184,6 +186,7 @@ class TestMPIOperations(TestCase):
         # Test with transposed tensor (non-contiguous)
         tensor2 = torch.arange(0, 24, dtype=torch.float32).reshape(2, 3, 4).transpose(1, 2) * (self.rank + 1)
         result2 = torch_mpi_ext.ops.all_gather_into_tensor(tensor2, self.comm_ptr, dim=1)
+        _synchronize_accelerator_if_needed()
         
         expected_parts2 = []
         for r in range(self.size):
@@ -217,6 +220,7 @@ class TestMPIOperations(TestCase):
 
                     # Perform all-gather-into-tensor on specified dim
                     torch_mpi_ext.ops.all_gather_into_tensor_out(output_tensor, tensor, self.comm_ptr, dim=dim)
+                    _synchronize_accelerator_if_needed()
 
                     # Verify shape
                     self.assertEqual(output_tensor.shape, torch.Size(expected_shape))
@@ -250,6 +254,7 @@ class TestMPIOperations(TestCase):
                 
                 # Perform all-gather-into-tensor-out
                 torch_mpi_ext.ops.all_gather_into_tensor_out(output_tensor, input_tensor, self.comm_ptr, dim=0)
+                _synchronize_accelerator_if_needed()
                 
                 # Prepare expected result
                 expected_parts = []
@@ -271,6 +276,7 @@ class TestMPIOperations(TestCase):
                 
                 # Perform all-gather-into-tensor-out along dim=1
                 torch_mpi_ext.ops.all_gather_into_tensor_out(output_tensor2, input_tensor2, self.comm_ptr, dim=1)
+                _synchronize_accelerator_if_needed()
 
                 # Prepare expected result
                 expected_parts2 = []
@@ -281,6 +287,41 @@ class TestMPIOperations(TestCase):
                 
                 # Check values
                 torch.testing.assert_close(output_tensor2, expected2)
+
+    def test_all_gather_wrappers_require_cpu_comm_ptr(self):
+        """Test all_gather wrappers reject device comm_ptr_wrapper tensors"""
+        comm_ptr_wrapper = torch.tensor([self.comm_ptr], dtype=torch.int64)
+        tensor = torch.arange(0, 6, dtype=torch.float32).reshape(2, 3) * (self.rank + 1)
+
+        result = torch_mpi_ext.ops.all_gather_into_tensor_wrapper(
+            tensor, comm_ptr_wrapper, dim=0)
+        _synchronize_accelerator_if_needed()
+
+        expected_parts = []
+        for r in range(self.size):
+            expected_parts.append(
+                torch.arange(0, 6, dtype=torch.float32).reshape(2, 3) * (r + 1))
+        expected = torch.cat(expected_parts, dim=0)
+        torch.testing.assert_close(result, expected)
+
+        output = torch.empty_like(result)
+        torch_mpi_ext.ops.all_gather_into_tensor_out_wrapper(
+            output, tensor, comm_ptr_wrapper, dim=0)
+        _synchronize_accelerator_if_needed()
+        torch.testing.assert_close(output, expected)
+
+        try:
+            device_comm_ptr_wrapper = comm_ptr_wrapper.to("mcpu")
+        except Exception as exc:
+            self.skipTest(f"mcpu device is not available: {exc}")
+
+        with self.assertRaisesRegex(RuntimeError, "comm_ptr_wrapper must be a CPU tensor"):
+            torch_mpi_ext.ops.all_gather_into_tensor_wrapper(
+                tensor, device_comm_ptr_wrapper, dim=0)
+
+        with self.assertRaisesRegex(RuntimeError, "comm_ptr_wrapper must be a CPU tensor"):
+            torch_mpi_ext.ops.all_gather_into_tensor_out_wrapper(
+                output, tensor, device_comm_ptr_wrapper, dim=0)
 
     def test_alltoallv_different_dtypes(self):
         """Test alltoallv with different data types"""
@@ -713,8 +754,10 @@ class TestMPICompile(TestCase):
                 
                 with torch.no_grad():
                     expected = model(input_expected, output_expected, self.comm_ptr, dim=0)
+                    _synchronize_accelerator_if_needed()
                     compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
                     actual = compiled_model(input_actual, output_actual, self.comm_ptr, dim=0)
+                    _synchronize_accelerator_if_needed()
                 
                 self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
 
