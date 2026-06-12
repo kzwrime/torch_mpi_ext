@@ -3,6 +3,8 @@
 #include <torch/all.h>
 #include <torch/library.h>
 
+#include <runtime/McpuKernelLaunch.h>
+
 #include <vector>
 
 #include "mpi.h"
@@ -63,27 +65,68 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
   if (input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16) {
     at::Tensor input_fp32 = input.to(torch::kFloat32);
     auto datatype = get_mpi_cal_datatype(input_fp32);
-    int result = MPI_Allreduce(MPI_IN_PLACE,           // send buffer
-                               input_fp32.data_ptr(),  // receive buffer
-                               input_fp32.numel(),     // count
-                               datatype,               // datatype
-                               MPI_SUM,                // operation
-                               c_comm                  // communicator
-    );
-    TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+    void* input_ptr = input_fp32.data_ptr();
+    int64_t numel = input_fp32.numel();
+    if (input.device().type() == c10::DeviceType::PrivateUse1) {
+      at::mcpu::launch_timed_kernel(
+          "mcpu::torch_mpi_ext::all_reduce_",
+          [input_fp32, input_ptr, numel, datatype, c_comm](
+              at::mcpu::kernel_timing::Event* timing_event) mutable {
+            MCPU_KERNEL_TIMING_SCOPE_EVENT(
+                "mcpu::torch_mpi_ext::all_reduce_", timing_event);
+            at::mcpu::KernelPointerMemoryGuard guard({input_ptr});
+            int result = MPI_Allreduce(MPI_IN_PLACE,  // send buffer
+                                       input_ptr,      // receive buffer
+                                       numel,          // count
+                                       datatype,       // datatype
+                                       MPI_SUM,        // operation
+                                       c_comm          // communicator
+            );
+            TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+          });
+    } else {
+      int result = MPI_Allreduce(MPI_IN_PLACE,  // send buffer
+                                 input_ptr,     // receive buffer
+                                 numel,         // count
+                                 datatype,      // datatype
+                                 MPI_SUM,       // operation
+                                 c_comm         // communicator
+      );
+      TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+    }
     input.copy_(input_fp32);
   } else {
     auto datatype = get_mpi_cal_datatype(input);
+    void* input_ptr = input.data_ptr();
+    int64_t numel = input.numel();
 
-    int result = MPI_Allreduce(MPI_IN_PLACE,      // send buffer
-                               input.data_ptr(),  // receive buffer
-                               input.numel(),     // count
-                               datatype,          // datatype
-                               MPI_SUM,           // operation
-                               c_comm             // communicator
-    );
-
-    TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+    if (input.device().type() == c10::DeviceType::PrivateUse1) {
+      at::mcpu::launch_timed_kernel(
+          "mcpu::torch_mpi_ext::all_reduce_",
+          [input, input_ptr, numel, datatype, c_comm](
+              at::mcpu::kernel_timing::Event* timing_event) mutable {
+            MCPU_KERNEL_TIMING_SCOPE_EVENT(
+                "mcpu::torch_mpi_ext::all_reduce_", timing_event);
+            at::mcpu::KernelPointerMemoryGuard guard({input_ptr});
+            int result = MPI_Allreduce(MPI_IN_PLACE,  // send buffer
+                                       input_ptr,      // receive buffer
+                                       numel,          // count
+                                       datatype,       // datatype
+                                       MPI_SUM,        // operation
+                                       c_comm          // communicator
+            );
+            TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+          });
+    } else {
+      int result = MPI_Allreduce(MPI_IN_PLACE,  // send buffer
+                                 input_ptr,     // receive buffer
+                                 numel,         // count
+                                 datatype,      // datatype
+                                 MPI_SUM,       // operation
+                                 c_comm         // communicator
+      );
+      TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+    }
   }
 }
 
@@ -356,30 +399,32 @@ void alltoall_out(at::Tensor& recvbuf, const at::Tensor& sendbuf_,
 // These extract the comm_ptr from the tensor and call the original functions
 // =============================================================================
 
-// Wrapper for all_reduce_ (in-place)
-void all_reduce__wrapper(at::Tensor& input,
-                         const at::Tensor& comm_ptr_wrapper) {
+long get_comm_ptr_from_cpu_wrapper(const at::Tensor& comm_ptr_wrapper) {
+  TORCH_CHECK(
+      comm_ptr_wrapper.device().type() == c10::DeviceType::CPU,
+      "comm_ptr_wrapper must be a CPU tensor");
   TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
                   comm_ptr_wrapper.size(0) == 1,
               "comm_ptr_wrapper must be a 1-element tensor");
   TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
               "comm_ptr_wrapper must be int64 dtype");
-  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+  return (long)comm_ptr_wrapper.data_ptr<int64_t>()[0];
+}
 
-  all_reduce_(input, (long)comm_ptr);
+// Wrapper for all_reduce_ (in-place)
+void all_reduce__wrapper(at::Tensor& input,
+                         const at::Tensor& comm_ptr_wrapper) {
+  long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
+
+  all_reduce_(input, comm_ptr);
 }
 
 // Wrapper for all_reduce (out-of-place)
 at::Tensor all_reduce_wrapper(const at::Tensor& input,
                               const at::Tensor& comm_ptr_wrapper) {
-  TORCH_CHECK(comm_ptr_wrapper.ndimension() == 1 &&
-                  comm_ptr_wrapper.size(0) == 1,
-              "comm_ptr_wrapper must be a 1-element tensor");
-  TORCH_CHECK(comm_ptr_wrapper.dtype() == torch::kInt64,
-              "comm_ptr_wrapper must be int64 dtype");
-  int64_t comm_ptr = comm_ptr_wrapper.data_ptr<int64_t>()[0];
+  long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
 
-  return all_reduce(input, (long)comm_ptr);
+  return all_reduce(input, comm_ptr);
 }
 
 // Wrapper for all_gather_into_tensor

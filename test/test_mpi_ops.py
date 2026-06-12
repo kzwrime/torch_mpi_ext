@@ -17,6 +17,12 @@ try:
 except ImportError:
     EXTENSION_AVAILABLE = False
 
+
+def _synchronize_accelerator_if_needed():
+    if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
+        torch.accelerator.synchronize()
+
+
 @unittest.skipIf(not MPI_AVAILABLE, "mpi4py not available")
 @unittest.skipIf(not EXTENSION_AVAILABLE, "torch_mpi_ext not available")
 class TestMPIOperations(TestCase):
@@ -39,6 +45,7 @@ class TestMPIOperations(TestCase):
                     tensor = torch.ones(3, dtype=dtype) * (self.rank + 1)
                     
                 result = torch_mpi_ext.ops.all_reduce(tensor, self.comm_ptr)
+                _synchronize_accelerator_if_needed()
                 
                 expected_sum = self.size * (self.size + 1) / 2
                 if dtype in [torch.float32, torch.float64]:
@@ -59,6 +66,7 @@ class TestMPIOperations(TestCase):
                     
                 result = torch_mpi_ext.ops.all_reduce_(tensor, self.comm_ptr)
                 self.assertTrue(result == None)
+                _synchronize_accelerator_if_needed()
 
                 expected_sum = self.size * (self.size + 1) / 2
                 if dtype in [torch.float32, torch.float64, torch.float16, torch.bfloat16]:
@@ -67,6 +75,34 @@ class TestMPIOperations(TestCase):
                     expected = torch.ones(3, dtype=dtype) * int(expected_sum)
                     
                 torch.testing.assert_close(tensor, expected)
+
+    def test_all_reduce_wrappers_require_cpu_comm_ptr(self):
+        """Test all_reduce wrappers reject device comm_ptr_wrapper tensors"""
+        comm_ptr_wrapper = torch.tensor([self.comm_ptr], dtype=torch.int64)
+        tensor = torch.ones(3, dtype=torch.float32) * (self.rank + 1)
+
+        result = torch_mpi_ext.ops.all_reduce_wrapper(tensor, comm_ptr_wrapper)
+        _synchronize_accelerator_if_needed()
+
+        expected_sum = self.size * (self.size + 1) / 2
+        expected = torch.ones(3, dtype=torch.float32) * expected_sum
+        torch.testing.assert_close(result, expected)
+
+        tensor_inplace = torch.ones(3, dtype=torch.float32) * (self.rank + 1)
+        torch_mpi_ext.ops.all_reduce__wrapper(tensor_inplace, comm_ptr_wrapper)
+        _synchronize_accelerator_if_needed()
+        torch.testing.assert_close(tensor_inplace, expected)
+
+        try:
+            device_comm_ptr_wrapper = comm_ptr_wrapper.to("mcpu")
+        except Exception as exc:
+            self.skipTest(f"mcpu device is not available: {exc}")
+
+        with self.assertRaisesRegex(RuntimeError, "comm_ptr_wrapper must be a CPU tensor"):
+            torch_mpi_ext.ops.all_reduce_wrapper(tensor, device_comm_ptr_wrapper)
+
+        with self.assertRaisesRegex(RuntimeError, "comm_ptr_wrapper must be a CPU tensor"):
+            torch_mpi_ext.ops.all_reduce__wrapper(tensor_inplace, device_comm_ptr_wrapper)
 
     def test_all_gather_into_tensor_different_dtypes_and_dims(self):
         """Test all_gather with negative dim"""
@@ -111,6 +147,7 @@ class TestMPIOperations(TestCase):
                 tensor = tensor * (self.rank + 1)  # Rank-specific values
                 
                 result = torch_mpi_ext.ops.all_reduce(tensor, self.comm_ptr)
+                _synchronize_accelerator_if_needed()
                 
                 expected_sum = self.size * (self.size + 1) // 2
                 expected = torch.arange(0, 10, dtype=dtype).expand(3, 10)[::2] * expected_sum
@@ -120,6 +157,7 @@ class TestMPIOperations(TestCase):
                 # Test with transposed tensor (non-contiguous)
                 tensor2 = torch.arange(0, 24, dtype=dtype).reshape(2, 3, 4).transpose(0, 2) * (self.rank + 1)
                 result2 = torch_mpi_ext.ops.all_reduce(tensor2, self.comm_ptr)
+                _synchronize_accelerator_if_needed()
                 
                 expected_sum2 = self.size * (self.size + 1) // 2
                 expected2 = torch.arange(0, 24, dtype=dtype).reshape(2, 3, 4).transpose(0, 2) * expected_sum2
@@ -591,8 +629,10 @@ class TestMPICompile(TestCase):
                 
                 with torch.no_grad():
                     expected = model(x, self.comm_ptr)
+                    _synchronize_accelerator_if_needed()
                     compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
                     actual = compiled_model(x, self.comm_ptr)
+                    _synchronize_accelerator_if_needed()
                 
                 self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
 
@@ -628,9 +668,11 @@ class TestMPICompile(TestCase):
                     x_actual = x.clone()
                     
                     expected = model(x_expected, self.comm_ptr)
+                    _synchronize_accelerator_if_needed()
                     # compiled_model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
                     compiled_model = torch.compile(model, fullgraph=True)
                     actual = compiled_model(x_actual, self.comm_ptr)
+                    _synchronize_accelerator_if_needed()
                 
                 self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
 
