@@ -55,6 +55,15 @@ MPI_Datatype get_mpi_width_datatype(const at::Tensor& tensor) {
   return datatype;
 }
 
+template <typename Dst, typename Src>
+void copy_with_cast(void* dst_ptr, const void* src_ptr, int64_t numel) {
+  auto* dst = static_cast<Dst*>(dst_ptr);
+  const auto* src = static_cast<const Src*>(src_ptr);
+  for (int64_t i = 0; i < numel; ++i) {
+    dst[i] = static_cast<Dst>(src[i]);
+  }
+}
+
 void copy_allgather_intermediate_to_output(
     const void* temp_ptr,
     void* output_ptr,
@@ -96,28 +105,48 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
 
   // TODO
   if (input.dtype() == torch::kFloat16 || input.dtype() == torch::kBFloat16) {
-    at::Tensor input_fp32 = input.to(torch::kFloat32);
-    auto datatype = get_mpi_cal_datatype(input_fp32);
-    void* input_ptr = input_fp32.data_ptr();
-    int64_t numel = input_fp32.numel();
     if (input.device().type() == c10::DeviceType::PrivateUse1) {
+      void* input_ptr = input.data_ptr();
+      int64_t numel = input.numel();
+      auto scalar_type = input.scalar_type();
       at::mcpu::launch_timed_kernel(
           "mcpu::torch_mpi_ext::all_reduce_",
-          [input_fp32, input_ptr, numel, datatype, c_comm](
-              at::mcpu::kernel_timing::Event* timing_event) mutable {
-            MCPU_KERNEL_TIMING_SCOPE_EVENT(
-                "mcpu::torch_mpi_ext::all_reduce_", timing_event);
+          [input_ptr, numel, scalar_type,
+           c_comm](at::mcpu::kernel_timing::Event* timing_event) mutable {
+            MCPU_KERNEL_TIMING_SCOPE_EVENT("mcpu::torch_mpi_ext::all_reduce_",
+                                           timing_event);
             at::mcpu::KernelPointerMemoryGuard guard({input_ptr});
-            int result = MPI_Allreduce(MPI_IN_PLACE,  // send buffer
-                                       input_ptr,      // receive buffer
+
+            std::vector<float> buffer(numel);
+            if (scalar_type == at::kHalf) {
+              copy_with_cast<float, c10::Half>(buffer.data(), input_ptr, numel);
+            } else {
+              copy_with_cast<float, c10::BFloat16>(buffer.data(), input_ptr,
+                                                   numel);
+            }
+
+            int result = MPI_Allreduce(MPI_IN_PLACE,   // send buffer
+                                       buffer.data(),  // receive buffer
                                        numel,          // count
-                                       datatype,       // datatype
+                                       MPI_FLOAT,      // datatype
                                        MPI_SUM,        // operation
                                        c_comm          // communicator
             );
             TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+
+            if (scalar_type == at::kHalf) {
+              copy_with_cast<c10::Half, float>(input_ptr, buffer.data(), numel);
+            } else {
+              copy_with_cast<c10::BFloat16, float>(input_ptr, buffer.data(),
+                                                   numel);
+            }
           });
+      return;
     } else {
+      at::Tensor input_fp32 = input.to(torch::kFloat32);
+      auto datatype = get_mpi_cal_datatype(input_fp32);
+      void* input_ptr = input_fp32.data_ptr();
+      int64_t numel = input_fp32.numel();
       int result = MPI_Allreduce(MPI_IN_PLACE,  // send buffer
                                  input_ptr,     // receive buffer
                                  numel,         // count
@@ -126,8 +155,8 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
                                  c_comm         // communicator
       );
       TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
+      input.copy_(input_fp32);
     }
-    input.copy_(input_fp32);
   } else {
     auto datatype = get_mpi_cal_datatype(input);
     void* input_ptr = input.data_ptr();
@@ -136,7 +165,7 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
     if (input.device().type() == c10::DeviceType::PrivateUse1) {
       at::mcpu::launch_timed_kernel(
           "mcpu::torch_mpi_ext::all_reduce_",
-          [input, input_ptr, numel, datatype, c_comm](
+          [input_ptr, numel, datatype, c_comm](
               at::mcpu::kernel_timing::Event* timing_event) mutable {
             MCPU_KERNEL_TIMING_SCOPE_EVENT(
                 "mcpu::torch_mpi_ext::all_reduce_", timing_event);
