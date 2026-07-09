@@ -5,7 +5,7 @@
 
 #include <runtime/McpuKernelLaunch.h>
 
-#include <cstring>
+#include <limits>
 #include <vector>
 
 #include "mpi.h"
@@ -64,36 +64,93 @@ void copy_with_cast(void* dst_ptr, const void* src_ptr, int64_t numel) {
   }
 }
 
-void copy_allgather_intermediate_to_output(
-    const void* temp_ptr,
-    void* output_ptr,
+struct DirectAllgatherShape {
+  int send_count = 0;
+  int outer = 0;
+  int block_elements = 0;
+  int stride_elements = 0;
+};
+
+DirectAllgatherShape validate_allgather_direct_output_dim(
+    int64_t numel,
     int64_t comm_size,
     int64_t outer,
     int64_t dim_size,
-    int64_t inner,
-    int64_t element_size) {
-  const char* temp_bytes = static_cast<const char*>(temp_ptr);
-  char* output_bytes = static_cast<char*>(output_ptr);
-  int64_t input_numel = outer * dim_size * inner;
-  int64_t output_dim_size = comm_size * dim_size;
+    int64_t inner) {
+  const int64_t block_elements = dim_size * inner;
+  const int64_t stride_elements = comm_size * block_elements;
 
-  for (int64_t outer_idx = 0; outer_idx < outer; ++outer_idx) {
-    for (int64_t rank = 0; rank < comm_size; ++rank) {
-      for (int64_t dim_idx = 0; dim_idx < dim_size; ++dim_idx) {
-        int64_t src_offset =
-            ((rank * input_numel) + (outer_idx * dim_size + dim_idx) * inner) *
-            element_size;
-        int64_t dst_offset =
-            ((outer_idx * output_dim_size + rank * dim_size + dim_idx) *
-             inner) *
-            element_size;
-        std::memcpy(
-            output_bytes + dst_offset,
-            temp_bytes + src_offset,
-            inner * element_size);
-      }
-    }
+  TORCH_CHECK(numel <= std::numeric_limits<int>::max(),
+              "MPI_Allgather count exceeds int range: ", numel);
+  TORCH_CHECK(outer <= std::numeric_limits<int>::max(),
+              "MPI receive type outer dimension exceeds int range: ", outer);
+  TORCH_CHECK(block_elements <= std::numeric_limits<int>::max(),
+              "MPI receive type block length exceeds int range: ",
+              block_elements);
+  TORCH_CHECK(stride_elements <= std::numeric_limits<int>::max(),
+              "MPI receive type stride exceeds int range: ", stride_elements);
+
+  DirectAllgatherShape shape;
+  shape.send_count = static_cast<int>(numel);
+  shape.outer = static_cast<int>(outer);
+  shape.block_elements = static_cast<int>(block_elements);
+  shape.stride_elements = static_cast<int>(stride_elements);
+  return shape;
+}
+
+void allgather_direct_into_output_dim(
+    const void* input_ptr,
+    void* output_ptr,
+    MPI_Datatype datatype,
+    MPI_Comm c_comm,
+    const DirectAllgatherShape& shape) {
+  MPI_Datatype strided_type = MPI_DATATYPE_NULL;
+  int result = MPI_Type_vector(
+      shape.outer,
+      shape.block_elements,
+      shape.stride_elements,
+      datatype,
+      &strided_type);
+  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Type_vector failed");
+
+  MPI_Aint lb = 0;
+  MPI_Aint datatype_extent = 0;
+  result = MPI_Type_get_extent(datatype, &lb, &datatype_extent);
+  if (result != MPI_SUCCESS) {
+    MPI_Type_free(&strided_type);
   }
+  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Type_get_extent failed");
+
+  MPI_Datatype recv_type = MPI_DATATYPE_NULL;
+  result = MPI_Type_create_resized(
+      strided_type, 0, shape.block_elements * datatype_extent, &recv_type);
+  if (result != MPI_SUCCESS) {
+    MPI_Type_free(&strided_type);
+  }
+  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Type_create_resized failed");
+
+  result = MPI_Type_commit(&recv_type);
+  if (result != MPI_SUCCESS) {
+    MPI_Type_free(&recv_type);
+    MPI_Type_free(&strided_type);
+  }
+  TORCH_CHECK(result == MPI_SUCCESS, "MPI_Type_commit failed");
+
+  const int allgather_result = MPI_Allgather(
+      input_ptr,
+      shape.send_count,
+      datatype,
+      output_ptr,
+      1,
+      recv_type,
+      c_comm);
+
+  const int free_recv_result = MPI_Type_free(&recv_type);
+  const int free_strided_result = MPI_Type_free(&strided_type);
+
+  TORCH_CHECK(allgather_result == MPI_SUCCESS, "MPI_Allgather failed");
+  TORCH_CHECK(free_recv_result == MPI_SUCCESS, "MPI_Type_free failed");
+  TORCH_CHECK(free_strided_result == MPI_SUCCESS, "MPI_Type_free failed");
 }
 
 // In-place all-reduce operation
@@ -236,8 +293,6 @@ at::Tensor all_gather_into_tensor(const at::Tensor& input_, long comm_ptr,
   at::Tensor output = at::empty(final_shape, input.options());
 
   if (input.device().type() == c10::DeviceType::PrivateUse1) {
-    at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
-
     int64_t outer = 1;
     for (int64_t i = 0; i < actual_dim; ++i) {
       outer *= input_sizes[i];
@@ -249,48 +304,29 @@ at::Tensor all_gather_into_tensor(const at::Tensor& input_, long comm_ptr,
     }
 
     const void* input_ptr = input.data_ptr();
-    void* temp_ptr = temp_buffer.data_ptr();
     void* output_ptr = output.data_ptr();
     int64_t numel = input.numel();
-    int64_t element_size = input.element_size();
+    DirectAllgatherShape allgather_shape =
+        validate_allgather_direct_output_dim(
+            numel, comm_size, outer, dim_size, inner);
 
     at::mcpu::launch_timed_kernel(
         "mcpu::torch_mpi_ext::all_gather_into_tensor",
-        [input,
-         temp_buffer,
-         output,
-         input_ptr,
-         temp_ptr,
+        [input_ptr,
          output_ptr,
-         numel,
          datatype,
          c_comm,
-         comm_size,
-         outer,
-         dim_size,
-         inner,
-         element_size](at::mcpu::kernel_timing::Event* timing_event) mutable {
+         allgather_shape](
+            at::mcpu::kernel_timing::Event* timing_event) mutable {
           MCPU_KERNEL_TIMING_SCOPE_EVENT(
               "mcpu::torch_mpi_ext::all_gather_into_tensor", timing_event);
-          at::mcpu::KernelPointerMemoryGuard guard(
-              {input_ptr, temp_ptr, output_ptr});
-          int result = MPI_Allgather(input_ptr,  // send buffer
-                                     numel,      // send count
-                                     datatype,   // send datatype
-                                     temp_ptr,   // receive buffer
-                                     numel,      // receive count
-                                     datatype,   // receive datatype
-                                     c_comm      // communicator
-          );
-          TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
-          copy_allgather_intermediate_to_output(
-              temp_ptr,
+          at::mcpu::KernelPointerMemoryGuard guard({input_ptr, output_ptr});
+          allgather_direct_into_output_dim(
+              input_ptr,
               output_ptr,
-              comm_size,
-              outer,
-              dim_size,
-              inner,
-              element_size);
+              datatype,
+              c_comm,
+              allgather_shape);
         });
   } else {
     at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
@@ -354,11 +390,6 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
     intermediate_shape.push_back(input_sizes[i]);
   }
 
-  // We need a temporary tensor to hold the allgather result in the intermediate
-  // shape First, we create a tensor with the intermediate shape but flattened
-  // in the first 2 dimensions Then we use MPI_Allgather to fill it
-  at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
-
   if (input.device().type() == c10::DeviceType::PrivateUse1) {
     int64_t outer = 1;
     for (int64_t i = 0; i < actual_dim; ++i) {
@@ -371,50 +402,35 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
     }
 
     const void* input_ptr = input.data_ptr();
-    void* temp_ptr = temp_buffer.data_ptr();
     void* output_ptr = output.data_ptr();
     int64_t numel = input.numel();
-    int64_t element_size = input.element_size();
+    DirectAllgatherShape allgather_shape =
+        validate_allgather_direct_output_dim(
+            numel, comm_size, outer, dim_size, inner);
 
     at::mcpu::launch_timed_kernel(
         "mcpu::torch_mpi_ext::all_gather_into_tensor_out",
-        [input,
-         temp_buffer,
-         output,
-         input_ptr,
-         temp_ptr,
+        [input_ptr,
          output_ptr,
-         numel,
          datatype,
          c_comm,
-         comm_size,
-         outer,
-         dim_size,
-         inner,
-         element_size](at::mcpu::kernel_timing::Event* timing_event) mutable {
+         allgather_shape](
+            at::mcpu::kernel_timing::Event* timing_event) mutable {
           MCPU_KERNEL_TIMING_SCOPE_EVENT(
               "mcpu::torch_mpi_ext::all_gather_into_tensor_out", timing_event);
-          at::mcpu::KernelPointerMemoryGuard guard(
-              {input_ptr, temp_ptr, output_ptr});
-          int result = MPI_Allgather(input_ptr,  // send buffer
-                                     numel,      // send count
-                                     datatype,   // send datatype
-                                     temp_ptr,   // receive buffer
-                                     numel,      // receive count
-                                     datatype,   // receive datatype
-                                     c_comm      // communicator
-          );
-          TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allgather failed");
-          copy_allgather_intermediate_to_output(
-              temp_ptr,
+          at::mcpu::KernelPointerMemoryGuard guard({input_ptr, output_ptr});
+          allgather_direct_into_output_dim(
+              input_ptr,
               output_ptr,
-              comm_size,
-              outer,
-              dim_size,
-              inner,
-              element_size);
+              datatype,
+              c_comm,
+              allgather_shape);
         });
   } else {
+    // We need a temporary tensor to hold the allgather result in the
+    // intermediate shape. Then we move the world_size dimension into place.
+    at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
+
     result = MPI_Allgather(input.data_ptr(),        // send buffer
                            input.numel(),           // send count
                            datatype,                // send datatype
