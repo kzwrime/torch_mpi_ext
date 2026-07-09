@@ -76,7 +76,33 @@ void copy_allgather_intermediate_to_output(
   char* output_bytes = static_cast<char*>(output_ptr);
   int64_t input_numel = outer * dim_size * inner;
   int64_t output_dim_size = comm_size * dim_size;
+  int64_t total_bytes = comm_size * input_numel * element_size;
 
+  if (outer == 1) {
+    std::memcpy(output_bytes, temp_bytes, total_bytes);
+    return;
+  }
+
+  if (inner == 1) {
+    int64_t dim_block_bytes = dim_size * element_size;
+
+    #pragma omp parallel for collapse(2)
+    for (int64_t outer_idx = 0; outer_idx < outer; ++outer_idx) {
+      for (int64_t rank = 0; rank < comm_size; ++rank) {
+        int64_t src_offset =
+            (rank * input_numel + outer_idx * dim_size) * element_size;
+        int64_t dst_offset =
+            (outer_idx * output_dim_size + rank * dim_size) * element_size;
+        std::memcpy(
+            output_bytes + dst_offset,
+            temp_bytes + src_offset,
+            dim_block_bytes);
+      }
+    }
+    return;
+  }
+
+  #pragma omp parallel for collapse(2)
   for (int64_t outer_idx = 0; outer_idx < outer; ++outer_idx) {
     for (int64_t rank = 0; rank < comm_size; ++rank) {
       for (int64_t dim_idx = 0; dim_idx < dim_size; ++dim_idx) {
@@ -236,8 +262,6 @@ at::Tensor all_gather_into_tensor(const at::Tensor& input_, long comm_ptr,
   at::Tensor output = at::empty(final_shape, input.options());
 
   if (input.device().type() == c10::DeviceType::PrivateUse1) {
-    at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
-
     int64_t outer = 1;
     for (int64_t i = 0; i < actual_dim; ++i) {
       outer *= input_sizes[i];
@@ -249,18 +273,16 @@ at::Tensor all_gather_into_tensor(const at::Tensor& input_, long comm_ptr,
     }
 
     const void* input_ptr = input.data_ptr();
-    void* temp_ptr = temp_buffer.data_ptr();
     void* output_ptr = output.data_ptr();
     int64_t numel = input.numel();
     int64_t element_size = input.element_size();
+    at::TensorOptions input_options = input.options();
 
     at::mcpu::launch_timed_kernel(
         "mcpu::torch_mpi_ext::all_gather_into_tensor",
-        [input,
-         temp_buffer,
-         output,
+        [intermediate_shape,
+         input_options,
          input_ptr,
-         temp_ptr,
          output_ptr,
          numel,
          datatype,
@@ -272,6 +294,8 @@ at::Tensor all_gather_into_tensor(const at::Tensor& input_, long comm_ptr,
          element_size](at::mcpu::kernel_timing::Event* timing_event) mutable {
           MCPU_KERNEL_TIMING_SCOPE_EVENT(
               "mcpu::torch_mpi_ext::all_gather_into_tensor", timing_event);
+          at::Tensor temp_buffer = at::empty(intermediate_shape, input_options);
+          void* temp_ptr = temp_buffer.data_ptr();
           at::mcpu::KernelPointerMemoryGuard guard(
               {input_ptr, temp_ptr, output_ptr});
           int result = MPI_Allgather(input_ptr,  // send buffer
@@ -354,11 +378,6 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
     intermediate_shape.push_back(input_sizes[i]);
   }
 
-  // We need a temporary tensor to hold the allgather result in the intermediate
-  // shape First, we create a tensor with the intermediate shape but flattened
-  // in the first 2 dimensions Then we use MPI_Allgather to fill it
-  at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
-
   if (input.device().type() == c10::DeviceType::PrivateUse1) {
     int64_t outer = 1;
     for (int64_t i = 0; i < actual_dim; ++i) {
@@ -371,18 +390,16 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
     }
 
     const void* input_ptr = input.data_ptr();
-    void* temp_ptr = temp_buffer.data_ptr();
     void* output_ptr = output.data_ptr();
     int64_t numel = input.numel();
     int64_t element_size = input.element_size();
+    at::TensorOptions input_options = input.options();
 
     at::mcpu::launch_timed_kernel(
         "mcpu::torch_mpi_ext::all_gather_into_tensor_out",
-        [input,
-         temp_buffer,
-         output,
+        [intermediate_shape,
+         input_options,
          input_ptr,
-         temp_ptr,
          output_ptr,
          numel,
          datatype,
@@ -394,6 +411,8 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
          element_size](at::mcpu::kernel_timing::Event* timing_event) mutable {
           MCPU_KERNEL_TIMING_SCOPE_EVENT(
               "mcpu::torch_mpi_ext::all_gather_into_tensor_out", timing_event);
+          at::Tensor temp_buffer = at::empty(intermediate_shape, input_options);
+          void* temp_ptr = temp_buffer.data_ptr();
           at::mcpu::KernelPointerMemoryGuard guard(
               {input_ptr, temp_ptr, output_ptr});
           int result = MPI_Allgather(input_ptr,  // send buffer
@@ -415,6 +434,8 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
               element_size);
         });
   } else {
+    at::Tensor temp_buffer = at::empty(intermediate_shape, input.options());
+
     result = MPI_Allgather(input.data_ptr(),        // send buffer
                            input.numel(),           // send count
                            datatype,                // send datatype
