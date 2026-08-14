@@ -6,6 +6,8 @@
 #include <runtime/McpuKernelLaunch.h>
 
 #include <cstring>
+#include <limits>
+#include <numeric>
 #include <vector>
 
 #include "mpi.h"
@@ -91,6 +93,61 @@ void copy_allgather_intermediate_to_output(
             output_bytes + dst_offset,
             temp_bytes + src_offset,
             inner * element_size);
+      }
+    }
+  }
+}
+
+int64_t normalize_dim(const at::Tensor& tensor, int64_t dim) {
+  TORCH_CHECK(tensor.dim() > 0, "collective input must have at least one dimension");
+  TORCH_CHECK(dim >= -tensor.dim() && dim < tensor.dim(), "invalid dim ", dim,
+              " for input with ", tensor.dim(), " dimensions");
+  return dim < 0 ? dim + tensor.dim() : dim;
+}
+
+std::vector<int64_t> get_collective_sizes(const at::Tensor& sizes_,
+                                          int comm_size) {
+  TORCH_CHECK(sizes_.device().is_cpu(), "sizes must be a CPU tensor");
+  TORCH_CHECK(sizes_.dim() == 1 && sizes_.numel() == comm_size,
+              "sizes must contain one value per rank");
+  at::Tensor sizes = sizes_.to(torch::kInt64).contiguous();
+  const int64_t* sizes_ptr = sizes.const_data_ptr<int64_t>();
+  std::vector<int64_t> result(sizes_ptr, sizes_ptr + comm_size);
+  for (int64_t size : result) {
+    TORCH_CHECK(size >= 0, "sizes must be non-negative");
+  }
+  return result;
+}
+
+int checked_mpi_count(int64_t value, const char* name) {
+  TORCH_CHECK(value >= 0 && value <= std::numeric_limits<int>::max(), name,
+              " exceeds the MPI int count limit: ", value);
+  return static_cast<int>(value);
+}
+
+void check_same_tensor_layout(const at::Tensor& output,
+                              const at::Tensor& input) {
+  TORCH_CHECK(output.device() == input.device(),
+              "output must be on the same device as input");
+  TORCH_CHECK(output.scalar_type() == input.scalar_type(),
+              "output must have the same dtype as input");
+  TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
+}
+
+void copy_dim0_intermediate_to_output(const void* temp_ptr, void* output_ptr,
+                                      int64_t outer, int64_t dim_size,
+                                      int64_t inner, int64_t element_size) {
+  const char* temp_bytes = static_cast<const char*>(temp_ptr);
+  char* output_bytes = static_cast<char*>(output_ptr);
+  for (int64_t outer_idx = 0; outer_idx < outer; ++outer_idx) {
+    for (int64_t dim_idx = 0; dim_idx < dim_size; ++dim_idx) {
+      int64_t src_offset =
+          (dim_idx * outer + outer_idx) * inner * element_size;
+      int64_t dst_offset =
+          (outer_idx * dim_size + dim_idx) * inner * element_size;
+      if (inner > 0) {
+        std::memcpy(output_bytes + dst_offset, temp_bytes + src_offset,
+                    inner * element_size);
       }
     }
   }
@@ -438,6 +495,215 @@ at::Tensor& all_gather_into_tensor_out(at::Tensor& output,
   return output;
 }
 
+void reduce_scatter_out_impl(at::Tensor& output, const at::Tensor& input_,
+                             const std::vector<int64_t>& dim_sizes,
+                             MPI_Comm c_comm, int64_t actual_dim,
+                             bool use_block_collective) {
+  int comm_size = 0;
+  int comm_rank = 0;
+  TORCH_CHECK(MPI_Comm_size(c_comm, &comm_size) == MPI_SUCCESS,
+              "MPI_Comm_size failed");
+  TORCH_CHECK(MPI_Comm_rank(c_comm, &comm_rank) == MPI_SUCCESS,
+              "MPI_Comm_rank failed");
+  TORCH_CHECK(static_cast<int>(dim_sizes.size()) == comm_size,
+              "sizes must contain one value per rank");
+  const int64_t total_dim_size =
+      std::accumulate(dim_sizes.begin(), dim_sizes.end(), int64_t{0});
+  TORCH_CHECK(input_.size(actual_dim) == total_dim_size,
+              "input size along dim must equal sum(sizes): ",
+              input_.size(actual_dim), " != ", total_dim_size);
+
+  std::vector<int64_t> expected_shape = input_.sizes().vec();
+  expected_shape[actual_dim] = dim_sizes[comm_rank];
+  TORCH_CHECK(output.sizes().vec() == expected_shape,
+              "output has incorrect shape; expected ", expected_shape,
+              ", got ", output.sizes().vec());
+  check_same_tensor_layout(output, input_);
+
+  int64_t outer = 1;
+  for (int64_t index = 0; index < actual_dim; ++index) {
+    outer *= input_.size(index);
+  }
+  int64_t inner = 1;
+  for (int64_t index = actual_dim + 1; index < input_.dim(); ++index) {
+    inner *= input_.size(index);
+  }
+  std::vector<int> recvcounts(comm_size);
+  for (int rank = 0; rank < comm_size; ++rank) {
+    recvcounts[rank] =
+        checked_mpi_count(dim_sizes[rank] * outer * inner, "receive count");
+  }
+  TORCH_CHECK(input_.numel() ==
+                  std::accumulate(recvcounts.begin(), recvcounts.end(),
+                                  int64_t{0}),
+              "flattened input size does not match receive counts");
+
+  const at::Tensor input = input_.movedim(actual_dim, 0).contiguous();
+  at::Tensor temp = at::empty({recvcounts[comm_rank]}, input.options());
+  const void* input_ptr = input.const_data_ptr();
+  void* temp_ptr = temp.mutable_data_ptr();
+  void* output_ptr = output.mutable_data_ptr();
+  const int64_t local_dim_size = dim_sizes[comm_rank];
+  const int64_t element_size = input.element_size();
+  const bool needs_fp32 = input.scalar_type() == at::kHalf ||
+                          input.scalar_type() == at::kBFloat16;
+
+  auto run_private =
+      [input, temp, output, input_ptr, temp_ptr, output_ptr, recvcounts,
+       use_block_collective, c_comm, comm_rank, outer, local_dim_size, inner,
+       element_size, needs_fp32](
+          at::mcpu::kernel_timing::Event* timing_event) mutable {
+        MCPU_KERNEL_TIMING_SCOPE_EVENT("mcpu::torch_mpi_ext::reduce_scatter",
+                                       timing_event);
+        at::mcpu::KernelPointerMemoryGuard guard(
+            {const_cast<void*>(input_ptr), temp_ptr, output_ptr});
+        int result = MPI_SUCCESS;
+        if (needs_fp32) {
+          std::vector<float> send_buffer(input.numel());
+          std::vector<float> recv_buffer(recvcounts[comm_rank]);
+          if (input.scalar_type() == at::kHalf) {
+            copy_with_cast<float, c10::Half>(send_buffer.data(), input_ptr,
+                                             input.numel());
+          } else {
+            copy_with_cast<float, c10::BFloat16>(send_buffer.data(), input_ptr,
+                                                 input.numel());
+          }
+          if (use_block_collective) {
+            result = MPI_Reduce_scatter_block(
+                send_buffer.data(), recv_buffer.data(), recvcounts[comm_rank],
+                MPI_FLOAT, MPI_SUM, c_comm);
+          } else {
+            result = MPI_Reduce_scatter(send_buffer.data(), recv_buffer.data(),
+                                        recvcounts.data(), MPI_FLOAT, MPI_SUM,
+                                        c_comm);
+          }
+          TORCH_CHECK(result == MPI_SUCCESS, "MPI reduce-scatter failed");
+          if (input.scalar_type() == at::kHalf) {
+            copy_with_cast<c10::Half, float>(temp_ptr, recv_buffer.data(),
+                                             recvcounts[comm_rank]);
+          } else {
+            copy_with_cast<c10::BFloat16, float>(
+                temp_ptr, recv_buffer.data(), recvcounts[comm_rank]);
+          }
+        } else {
+          const MPI_Datatype datatype = get_mpi_cal_datatype(input);
+          if (use_block_collective) {
+            result = MPI_Reduce_scatter_block(
+                input_ptr, temp_ptr, recvcounts[comm_rank], datatype, MPI_SUM,
+                c_comm);
+          } else {
+            result = MPI_Reduce_scatter(input_ptr, temp_ptr, recvcounts.data(),
+                                        datatype, MPI_SUM, c_comm);
+          }
+          TORCH_CHECK(result == MPI_SUCCESS, "MPI reduce-scatter failed");
+        }
+        copy_dim0_intermediate_to_output(temp_ptr, output_ptr, outer,
+                                         local_dim_size, inner, element_size);
+      };
+
+  if (input.device().type() == c10::DeviceType::PrivateUse1) {
+    at::mcpu::launch_timed_kernel("mcpu::torch_mpi_ext::reduce_scatter",
+                                  std::move(run_private));
+    return;
+  }
+
+  int result = MPI_SUCCESS;
+  if (needs_fp32) {
+    at::Tensor input_fp32 = input.to(torch::kFloat32);
+    at::Tensor temp_fp32 = at::empty({recvcounts[comm_rank]},
+                                     input.options().dtype(torch::kFloat32));
+    if (use_block_collective) {
+      result = MPI_Reduce_scatter_block(
+          input_fp32.data_ptr(), temp_fp32.data_ptr(), recvcounts[comm_rank],
+          MPI_FLOAT, MPI_SUM, c_comm);
+    } else {
+      result = MPI_Reduce_scatter(input_fp32.data_ptr(), temp_fp32.data_ptr(),
+                                  recvcounts.data(), MPI_FLOAT, MPI_SUM,
+                                  c_comm);
+    }
+    TORCH_CHECK(result == MPI_SUCCESS, "MPI reduce-scatter failed");
+    temp.copy_(temp_fp32);
+  } else {
+    const MPI_Datatype datatype = get_mpi_cal_datatype(input);
+    if (use_block_collective) {
+      result = MPI_Reduce_scatter_block(input_ptr, temp_ptr,
+                                        recvcounts[comm_rank], datatype,
+                                        MPI_SUM, c_comm);
+    } else {
+      result = MPI_Reduce_scatter(input_ptr, temp_ptr, recvcounts.data(),
+                                  datatype, MPI_SUM, c_comm);
+    }
+    TORCH_CHECK(result == MPI_SUCCESS, "MPI reduce-scatter failed");
+  }
+  copy_dim0_intermediate_to_output(temp_ptr, output_ptr, outer, local_dim_size,
+                                   inner, element_size);
+}
+
+void reduce_scatterv_out(at::Tensor& output, const at::Tensor& input,
+                         const at::Tensor& sizes, long comm_ptr, int64_t dim) {
+  MPI_Comm c_comm = MPI_Comm_f2c(static_cast<MPI_Fint>(comm_ptr));
+  int comm_size = 0;
+  TORCH_CHECK(MPI_Comm_size(c_comm, &comm_size) == MPI_SUCCESS,
+              "MPI_Comm_size failed");
+  const int64_t actual_dim = normalize_dim(input, dim);
+  const std::vector<int64_t> dim_sizes =
+      get_collective_sizes(sizes, comm_size);
+  reduce_scatter_out_impl(output, input, dim_sizes, c_comm, actual_dim, false);
+}
+
+at::Tensor reduce_scatterv(const at::Tensor& input, const at::Tensor& sizes,
+                           long comm_ptr, int64_t dim) {
+  MPI_Comm c_comm = MPI_Comm_f2c(static_cast<MPI_Fint>(comm_ptr));
+  int comm_size = 0;
+  int comm_rank = 0;
+  TORCH_CHECK(MPI_Comm_size(c_comm, &comm_size) == MPI_SUCCESS,
+              "MPI_Comm_size failed");
+  TORCH_CHECK(MPI_Comm_rank(c_comm, &comm_rank) == MPI_SUCCESS,
+              "MPI_Comm_rank failed");
+  const int64_t actual_dim = normalize_dim(input, dim);
+  const std::vector<int64_t> dim_sizes =
+      get_collective_sizes(sizes, comm_size);
+  std::vector<int64_t> output_shape = input.sizes().vec();
+  output_shape[actual_dim] = dim_sizes[comm_rank];
+  at::Tensor output = at::empty(output_shape, input.options());
+  reduce_scatter_out_impl(output, input, dim_sizes, c_comm, actual_dim, false);
+  return output;
+}
+
+void reduce_scatter_out(at::Tensor& output, const at::Tensor& input,
+                        long comm_ptr, int64_t dim) {
+  MPI_Comm c_comm = MPI_Comm_f2c(static_cast<MPI_Fint>(comm_ptr));
+  int comm_size = 0;
+  TORCH_CHECK(MPI_Comm_size(c_comm, &comm_size) == MPI_SUCCESS,
+              "MPI_Comm_size failed");
+  const int64_t actual_dim = normalize_dim(input, dim);
+  TORCH_CHECK(input.size(actual_dim) % comm_size == 0,
+              "input size along dim must be divisible by communicator size");
+  const int64_t chunk_size = input.size(actual_dim) / comm_size;
+  reduce_scatter_out_impl(
+      output, input, std::vector<int64_t>(comm_size, chunk_size), c_comm,
+      actual_dim, true);
+}
+
+at::Tensor reduce_scatter(const at::Tensor& input, long comm_ptr,
+                          int64_t dim) {
+  MPI_Comm c_comm = MPI_Comm_f2c(static_cast<MPI_Fint>(comm_ptr));
+  int comm_size = 0;
+  int comm_rank = 0;
+  TORCH_CHECK(MPI_Comm_size(c_comm, &comm_size) == MPI_SUCCESS,
+              "MPI_Comm_size failed");
+  TORCH_CHECK(MPI_Comm_rank(c_comm, &comm_rank) == MPI_SUCCESS,
+              "MPI_Comm_rank failed");
+  const int64_t actual_dim = normalize_dim(input, dim);
+  TORCH_CHECK(input.size(actual_dim) % comm_size == 0,
+              "input size along dim must be divisible by communicator size");
+  std::vector<int64_t> output_shape = input.sizes().vec();
+  output_shape[actual_dim] /= comm_size;
+  at::Tensor output = at::empty(output_shape, input.options());
+  reduce_scatter_out(output, input, comm_ptr, dim);
+  return output;
+}
+
 // All-to-allv operation (non-in-place version)
 at::Tensor alltoallv(const at::Tensor& sendbuf_, const at::Tensor& sendcounts_,
                      const at::Tensor& sdispls_, const at::Tensor& recvcounts_,
@@ -623,4 +889,34 @@ void all_gather_into_tensor_out_wrapper(at::Tensor& output,
   long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
 
   all_gather_into_tensor_out(output, input, comm_ptr, dim);
+}
+
+at::Tensor reduce_scatter_wrapper(const at::Tensor& input,
+                                  const at::Tensor& comm_ptr_wrapper,
+                                  int64_t dim) {
+  return reduce_scatter(input, get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper),
+                        dim);
+}
+
+void reduce_scatter_out_wrapper(at::Tensor& output, const at::Tensor& input,
+                                const at::Tensor& comm_ptr_wrapper,
+                                int64_t dim) {
+  reduce_scatter_out(output, input,
+                     get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper), dim);
+}
+
+at::Tensor reduce_scatterv_wrapper(const at::Tensor& input,
+                                   const at::Tensor& sizes,
+                                   const at::Tensor& comm_ptr_wrapper,
+                                   int64_t dim) {
+  return reduce_scatterv(input, sizes,
+                         get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper), dim);
+}
+
+void reduce_scatterv_out_wrapper(at::Tensor& output, const at::Tensor& input,
+                                 const at::Tensor& sizes,
+                                 const at::Tensor& comm_ptr_wrapper,
+                                 int64_t dim) {
+  reduce_scatterv_out(output, input, sizes,
+                      get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper), dim);
 }

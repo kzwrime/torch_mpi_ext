@@ -27,6 +27,21 @@ AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out(
     int64_t dim,
     [[maybe_unused]] void* output_args);
 
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_reduce_scatter_out(
+    AtenTensorHandle output,
+    AtenTensorHandle input,
+    int64_t comm_ptr,
+    int64_t dim,
+    [[maybe_unused]] void* output_args);
+
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_reduce_scatterv_out(
+    AtenTensorHandle output,
+    AtenTensorHandle input,
+    AtenTensorHandle sizes,
+    int64_t comm_ptr,
+    int64_t dim,
+    [[maybe_unused]] void* output_args);
+
 AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_alltoallv_out(
     AtenTensorHandle recvbuf,
     AtenTensorHandle sendbuf,
@@ -55,14 +70,33 @@ AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out_wrap
     int64_t dim,
     [[maybe_unused]] void* output_args);
 
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_reduce_scatter_out_wrapper(
+    AtenTensorHandle output,
+    AtenTensorHandle input,
+    AtenTensorHandle comm_ptr_wrapper,
+    int64_t dim,
+    [[maybe_unused]] void* output_args);
+
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_reduce_scatterv_out_wrapper(
+    AtenTensorHandle output,
+    AtenTensorHandle input,
+    AtenTensorHandle sizes,
+    AtenTensorHandle comm_ptr_wrapper,
+    int64_t dim,
+    [[maybe_unused]] void* output_args);
+
 // Skipped wrappers:
 // - mymuladd (torch_bindings.cpp): return type Tensor
 // - mymul (torch_bindings.cpp): return type Tensor
 // - all_reduce (torch_bindings.cpp): return type Tensor
 // - all_gather_into_tensor (torch_bindings.cpp): return type Tensor
+// - reduce_scatter (torch_bindings.cpp): return type Tensor
+// - reduce_scatterv (torch_bindings.cpp): return type Tensor
 // - alltoallv (torch_bindings.cpp): return type Tensor
 // - all_reduce_wrapper (torch_bindings.cpp): return type Tensor
 // - all_gather_into_tensor_wrapper (torch_bindings.cpp): return type Tensor
+// - reduce_scatter_wrapper (torch_bindings.cpp): return type Tensor
+// - reduce_scatterv_wrapper (torch_bindings.cpp): return type Tensor
 
 #ifdef __cplusplus
 } // extern "C"

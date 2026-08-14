@@ -1,10 +1,30 @@
 import torch
 from torch import Tensor
 
-__all__ = ["mymuladd", "myadd_out", "all_reduce", "all_reduce_", "all_reduce_wrapper",
-           "all_reduce__wrapper", "all_gather_into_tensor", "all_gather_into_tensor_wrapper",
-           "all_gather_into_tensor_out", "all_gather_into_tensor_out_wrapper",
-           "alltoall", "alltoall_out", "alltoallv", "alltoallv_out"]
+__all__ = [
+    "all_gather_into_tensor",
+    "all_gather_into_tensor_out",
+    "all_gather_into_tensor_out_wrapper",
+    "all_gather_into_tensor_wrapper",
+    "all_reduce",
+    "all_reduce_",
+    "all_reduce__wrapper",
+    "all_reduce_wrapper",
+    "alltoall",
+    "alltoall_out",
+    "alltoallv",
+    "alltoallv_out",
+    "myadd_out",
+    "mymuladd",
+    "reduce_scatter",
+    "reduce_scatter_out",
+    "reduce_scatter_out_wrapper",
+    "reduce_scatter_wrapper",
+    "reduce_scatterv",
+    "reduce_scatterv_out",
+    "reduce_scatterv_out_wrapper",
+    "reduce_scatterv_wrapper",
+]
 
 
 def mymuladd(a: Tensor, b: Tensor, c: float) -> Tensor:
@@ -194,6 +214,82 @@ def all_gather_into_tensor_out_wrapper(output: Tensor, input: Tensor, comm_ptr_w
         Same output tensor with gathered values written to it
     """
     return torch.ops.torch_mpi_ext.all_gather_into_tensor_out_wrapper.default(output, input, comm_ptr_wrapper, dim)
+
+
+def reduce_scatter(input: Tensor, comm_ptr: int, dim: int = -1) -> Tensor:
+    """Sum-reduce equal chunks and return this rank's chunk along dim."""
+    return torch.ops.torch_mpi_ext.reduce_scatter.default(input, comm_ptr, dim)
+
+
+def reduce_scatter_out(
+    output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1
+) -> None:
+    """Out variant of :func:`reduce_scatter`."""
+    torch.ops.torch_mpi_ext.reduce_scatter_out.default(
+        output, input, comm_ptr, dim
+    )
+
+
+def reduce_scatter_wrapper(
+    input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1
+) -> Tensor:
+    """Tensor-communicator wrapper for :func:`reduce_scatter`."""
+    return torch.ops.torch_mpi_ext.reduce_scatter_wrapper.default(
+        input, comm_ptr_wrapper, dim
+    )
+
+
+def reduce_scatter_out_wrapper(
+    output: Tensor, input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1
+) -> None:
+    """Tensor-communicator wrapper for :func:`reduce_scatter_out`."""
+    torch.ops.torch_mpi_ext.reduce_scatter_out_wrapper.default(
+        output, input, comm_ptr_wrapper, dim
+    )
+
+
+def reduce_scatterv(
+    input: Tensor, sizes: Tensor, comm_ptr: int, dim: int = -1
+) -> Tensor:
+    """Sum-reduce variable chunks and return this rank's chunk along dim."""
+    return torch.ops.torch_mpi_ext.reduce_scatterv.default(
+        input, sizes, comm_ptr, dim
+    )
+
+
+def reduce_scatterv_out(
+    output: Tensor,
+    input: Tensor,
+    sizes: Tensor,
+    comm_ptr: int,
+    dim: int = -1,
+) -> None:
+    """Out variant of :func:`reduce_scatterv`."""
+    torch.ops.torch_mpi_ext.reduce_scatterv_out.default(
+        output, input, sizes, comm_ptr, dim
+    )
+
+
+def reduce_scatterv_wrapper(
+    input: Tensor, sizes: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1
+) -> Tensor:
+    """Tensor-communicator wrapper for :func:`reduce_scatterv`."""
+    return torch.ops.torch_mpi_ext.reduce_scatterv_wrapper.default(
+        input, sizes, comm_ptr_wrapper, dim
+    )
+
+
+def reduce_scatterv_out_wrapper(
+    output: Tensor,
+    input: Tensor,
+    sizes: Tensor,
+    comm_ptr_wrapper: Tensor,
+    dim: int = -1,
+) -> None:
+    """Tensor-communicator wrapper for :func:`reduce_scatterv_out`."""
+    torch.ops.torch_mpi_ext.reduce_scatterv_out_wrapper.default(
+        output, input, sizes, comm_ptr_wrapper, dim
+    )
 
 
 def alltoall(sendbuf: Tensor, comm_ptr: int) -> Tensor:
@@ -469,6 +565,64 @@ def _(output: Tensor, input: Tensor, comm_ptr_wrapper: Tensor, dim: int = -1):
     torch._check(output.size(dim) % input.size(dim) == 0)
 
     # This is an out-of-place operation that writes to output tensor
+
+
+def _variable_collective_out_check(
+    output: Tensor, input: Tensor, sizes: Tensor | None, dim: int
+) -> None:
+    ndim = input.ndim
+    torch._check(ndim > 0)
+    torch._check(dim >= -ndim and dim < ndim)
+    if dim < 0:
+        dim += ndim
+    torch._check(output.ndim == ndim)
+    torch._check(output.device.type == input.device.type)
+    torch._check(output.dtype == input.dtype)
+    for index in range(ndim):
+        if index != dim:
+            torch._check(output.size(index) == input.size(index))
+    if sizes is not None:
+        torch._check(sizes.ndim == 1)
+        torch._check(sizes.dtype == torch.int64)
+
+
+def _comm_ptr_wrapper_check(comm_ptr_wrapper: Tensor) -> None:
+    torch._check(comm_ptr_wrapper.ndim == 1)
+    torch._check(comm_ptr_wrapper.size(0) == 1)
+    torch._check(comm_ptr_wrapper.dtype == torch.int64)
+
+
+@torch.library.register_fake("torch_mpi_ext::reduce_scatter_out")
+def _(output: Tensor, input: Tensor, comm_ptr: int, dim: int = -1):
+    _variable_collective_out_check(output, input, None, dim)
+
+
+@torch.library.register_fake("torch_mpi_ext::reduce_scatter_out_wrapper")
+def _(
+    output: Tensor,
+    input: Tensor,
+    comm_ptr_wrapper: Tensor,
+    dim: int = -1,
+):
+    _comm_ptr_wrapper_check(comm_ptr_wrapper)
+    _variable_collective_out_check(output, input, None, dim)
+
+
+@torch.library.register_fake("torch_mpi_ext::reduce_scatterv_out")
+def _(output: Tensor, input: Tensor, sizes: Tensor, comm_ptr: int, dim: int = -1):
+    _variable_collective_out_check(output, input, sizes, dim)
+
+
+@torch.library.register_fake("torch_mpi_ext::reduce_scatterv_out_wrapper")
+def _(
+    output: Tensor,
+    input: Tensor,
+    sizes: Tensor,
+    comm_ptr_wrapper: Tensor,
+    dim: int = -1,
+):
+    _comm_ptr_wrapper_check(comm_ptr_wrapper)
+    _variable_collective_out_check(output, input, sizes, dim)
 
 
 @torch.library.register_fake("torch_mpi_ext::alltoallv")

@@ -323,6 +323,130 @@ class TestMPIOperations(TestCase):
             torch_mpi_ext.ops.all_gather_into_tensor_out_wrapper(
                 output, tensor, device_comm_ptr_wrapper, dim=0)
 
+    def test_reduce_scatter_different_dims_and_wrappers(self):
+        comm_ptr_wrapper = torch.tensor([self.comm_ptr], dtype=torch.int64)
+
+        for dim in range(3):
+            with self.subTest(dim=dim):
+                shape = [2, 3, 4]
+                shape[dim] = 2 * self.size
+                tensor = (
+                    torch.arange(torch.tensor(shape).prod().item(), dtype=torch.float32)
+                    .reshape(shape)
+                    .add_(self.rank * 1000)
+                )
+                reduced = sum(
+                    torch.arange(
+                        torch.tensor(shape).prod().item(), dtype=torch.float32
+                    ).reshape(shape).add_(rank * 1000)
+                    for rank in range(self.size)
+                )
+                expected = reduced.narrow(dim, self.rank * 2, 2)
+
+                actual = torch_mpi_ext.ops.reduce_scatter(
+                    tensor, self.comm_ptr, dim
+                )
+                torch.testing.assert_close(actual, expected)
+
+                output = torch.empty_like(expected)
+                torch_mpi_ext.ops.reduce_scatter_out_wrapper(
+                    output, tensor, comm_ptr_wrapper, dim
+                )
+                torch.testing.assert_close(output, expected)
+
+    def test_reduce_scatterv_different_dims_dtypes_and_wrappers(self):
+        sizes = [rank + 1 for rank in range(self.size)]
+        sizes_tensor = torch.tensor(sizes, dtype=torch.int64)
+        comm_ptr_wrapper = torch.tensor([self.comm_ptr], dtype=torch.int64)
+
+        for dim in range(3):
+            for dtype in (torch.float32, torch.bfloat16, torch.int64):
+                with self.subTest(dim=dim, dtype=dtype):
+                    shape = [2, 3, 4]
+                    shape[dim] = sum(sizes)
+                    tensor = (
+                        torch.arange(torch.tensor(shape).prod().item(), dtype=dtype)
+                        .reshape(shape)
+                        .add_(self.rank * 100)
+                    )
+                    reduced = sum(
+                        torch.arange(torch.tensor(shape).prod().item(), dtype=dtype)
+                        .reshape(shape)
+                        .add_(rank * 100)
+                        for rank in range(self.size)
+                    )
+                    expected = reduced.narrow(
+                        dim, sum(sizes[: self.rank]), sizes[self.rank]
+                    )
+
+                    actual = torch_mpi_ext.ops.reduce_scatterv(
+                        tensor, sizes_tensor, self.comm_ptr, dim
+                    )
+                    torch.testing.assert_close(actual, expected)
+
+                    output = torch.empty_like(expected)
+                    torch_mpi_ext.ops.reduce_scatterv_out_wrapper(
+                        output,
+                        tensor,
+                        sizes_tensor,
+                        comm_ptr_wrapper,
+                        dim,
+                    )
+                    torch.testing.assert_close(output, expected)
+
+    def test_zero_sized_reduce_scatterv(self):
+        sizes = list(range(self.size))
+        sizes_tensor = torch.tensor(sizes, dtype=torch.int64)
+
+        reduce_input = torch.arange(
+            2 * sum(sizes) * 3, dtype=torch.float32
+        ).reshape(2, sum(sizes), 3)
+        scattered = torch_mpi_ext.ops.reduce_scatterv(
+            reduce_input, sizes_tensor, self.comm_ptr, dim=1
+        )
+        expected = (reduce_input * self.size).narrow(
+            1, sum(sizes[: self.rank]), sizes[self.rank]
+        )
+        torch.testing.assert_close(scattered, expected)
+
+    def test_mcpu_variable_collectives(self):
+        try:
+            import torch_mcpu  # noqa: F401
+
+            torch.empty(1).to("mcpu")
+        except (ImportError, RuntimeError) as exc:
+            self.skipTest(f"mcpu device is not available: {exc}")
+
+        sizes = [rank + 1 for rank in range(self.size)]
+        sizes_tensor = torch.tensor(sizes, dtype=torch.int64)
+        comm_ptr_wrapper = torch.tensor([self.comm_ptr], dtype=torch.int64)
+
+        total_size = sum(sizes)
+        reduce_input = (
+            torch.arange(2 * total_size * 3, dtype=torch.bfloat16)
+            .reshape(2, total_size, 3)
+            .add_(self.rank * 100)
+        )
+        reduced = sum(
+            torch.arange(2 * total_size * 3, dtype=torch.bfloat16)
+            .reshape(2, total_size, 3)
+            .add_(rank * 100)
+            for rank in range(self.size)
+        )
+        expected_scattered = reduced.narrow(
+            1, sum(sizes[: self.rank]), sizes[self.rank]
+        )
+        scattered = torch.empty_like(expected_scattered, device="mcpu")
+        torch_mpi_ext.ops.reduce_scatterv_out_wrapper(
+            scattered,
+            reduce_input.to("mcpu"),
+            sizes_tensor,
+            comm_ptr_wrapper,
+            dim=1,
+        )
+        _synchronize_accelerator_if_needed()
+        torch.testing.assert_close(scattered.cpu(), expected_scattered)
+
     def test_alltoallv_different_dtypes(self):
         """Test alltoallv with different data types"""
         dtypes = [torch.float32, torch.float64, torch.int8, torch.int16,
@@ -760,6 +884,32 @@ class TestMPICompile(TestCase):
                     _synchronize_accelerator_if_needed()
                 
                 self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_compile_reduce_scatterv_out_wrapper(self):
+        sizes = torch.arange(1, self.size + 1, dtype=torch.int64)
+        comm_ptr_wrapper = torch.tensor([self.comm_ptr], dtype=torch.int64)
+        local_size = int(sizes[self.rank])
+
+        def reduce_scatterv_model(output, input_):
+            torch_mpi_ext.ops.reduce_scatterv_out_wrapper(
+                output, input_, sizes, comm_ptr_wrapper, dim=1
+            )
+            return output + 1
+
+        scatter_input = torch.arange(
+            2 * int(sizes.sum()) * 3, dtype=torch.float32
+        ).reshape(2, int(sizes.sum()), 3).add_(self.rank * 100)
+        scatter_shape = (2, local_size, 3)
+        expected_scatter = reduce_scatterv_model(
+            torch.empty(scatter_shape), scatter_input
+        )
+        compiled_reduce_scatterv = torch.compile(
+            reduce_scatterv_model, fullgraph=True
+        )
+        actual_scatter = compiled_reduce_scatterv(
+            torch.empty(scatter_shape), scatter_input
+        )
+        torch.testing.assert_close(actual_scatter, expected_scatter)
 
     # def test_compile_alltoallv(self):
     #     """Test alltoallv with torch.compile"""

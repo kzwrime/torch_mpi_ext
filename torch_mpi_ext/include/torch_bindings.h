@@ -12,6 +12,13 @@ at::Tensor all_gather_into_tensor(const at::Tensor& input, long comm_ptr,
                                   int64_t dim);
 void all_gather_into_tensor_out(at::Tensor& output, const at::Tensor& input,
                                 long comm_ptr, int64_t dim);
+at::Tensor reduce_scatter(const at::Tensor& input, long comm_ptr, int64_t dim);
+void reduce_scatter_out(at::Tensor& output, const at::Tensor& input,
+                        long comm_ptr, int64_t dim);
+at::Tensor reduce_scatterv(const at::Tensor& input, const at::Tensor& sizes,
+                           long comm_ptr, int64_t dim);
+void reduce_scatterv_out(at::Tensor& output, const at::Tensor& input,
+                         const at::Tensor& sizes, long comm_ptr, int64_t dim);
 at::Tensor alltoallv(const at::Tensor& sendbuf, const at::Tensor& sendcounts,
                      const at::Tensor& sdispls, const at::Tensor& recvcounts,
                      const at::Tensor& rdispls, long comm_ptr);
@@ -32,3 +39,17 @@ void all_gather_into_tensor_out_wrapper(at::Tensor& output,
                                         const at::Tensor& input,
                                         const at::Tensor& comm_ptr_wrapper,
                                         int64_t dim);
+at::Tensor reduce_scatter_wrapper(const at::Tensor& input,
+                                  const at::Tensor& comm_ptr_wrapper,
+                                  int64_t dim);
+void reduce_scatter_out_wrapper(at::Tensor& output, const at::Tensor& input,
+                                const at::Tensor& comm_ptr_wrapper,
+                                int64_t dim);
+at::Tensor reduce_scatterv_wrapper(const at::Tensor& input,
+                                   const at::Tensor& sizes,
+                                   const at::Tensor& comm_ptr_wrapper,
+                                   int64_t dim);
+void reduce_scatterv_out_wrapper(at::Tensor& output, const at::Tensor& input,
+                                 const at::Tensor& sizes,
+                                 const at::Tensor& comm_ptr_wrapper,
+                                 int64_t dim);
