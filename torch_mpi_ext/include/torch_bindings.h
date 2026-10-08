@@ -8,6 +8,7 @@
 
 void all_reduce_(at::Tensor& input, long comm_ptr);
 at::Tensor all_reduce(const at::Tensor& input, long comm_ptr);
+void all_reduce_out(at::Tensor& output, const at::Tensor& input, long comm_ptr);
 at::Tensor all_gather_into_tensor(const at::Tensor& input, long comm_ptr,
                                   int64_t dim);
 void all_gather_into_tensor_out(at::Tensor& output, const at::Tensor& input,
@@ -32,6 +33,8 @@ void alltoall_out(at::Tensor& recvbuf, const at::Tensor& sendbuf,
 void all_reduce__wrapper(at::Tensor& input, const at::Tensor& comm_ptr_wrapper);
 at::Tensor all_reduce_wrapper(const at::Tensor& input,
                               const at::Tensor& comm_ptr_wrapper);
+void all_reduce_out_wrapper(at::Tensor& output, const at::Tensor& input,
+                            const at::Tensor& comm_ptr_wrapper);
 at::Tensor all_gather_into_tensor_wrapper(const at::Tensor& input,
                                           const at::Tensor& comm_ptr_wrapper,
                                           int64_t dim);

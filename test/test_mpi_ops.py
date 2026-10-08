@@ -1,6 +1,7 @@
 import torch
 from torch.testing._internal.common_utils import TestCase
 import unittest
+from unittest import mock
 import sys
 import os
 
@@ -103,6 +104,92 @@ class TestMPIOperations(TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "comm_ptr_wrapper must be a CPU tensor"):
             torch_mpi_ext.ops.all_reduce__wrapper(tensor_inplace, device_comm_ptr_wrapper)
+
+    def test_all_reduce_out(self):
+        """Both out APIs preserve input and write the supplied storage."""
+        comm = torch.tensor([self.comm_ptr], dtype=torch.int64, device="cpu")
+        dtypes = [torch.float32, torch.float64, torch.int8, torch.int16,
+                  torch.int32, torch.int64, torch.float16, torch.bfloat16]
+        rank_sum = self.size * (self.size + 1) // 2
+        for device in ("cpu", "mcpu"):
+            for dtype in dtypes:
+                for layout in ("contiguous", "transpose", "strided", "empty", "scalar"):
+                    for wrapper in (False, True):
+                        with self.subTest(device=device, dtype=dtype,
+                                          layout=layout, wrapper=wrapper):
+                            cpu_base = torch.arange(12, dtype=dtype).reshape(3, 4)
+                            base = (cpu_base * (self.rank + 1)).to(device)
+                            if layout == "transpose":
+                                input_ = base.t()
+                                expected = cpu_base.t() * rank_sum
+                            elif layout == "strided":
+                                input_ = base[:, ::2]
+                                expected = cpu_base[:, ::2] * rank_sum
+                            elif layout == "empty":
+                                input_ = base[:0]
+                                expected = cpu_base[:0]
+                            elif layout == "scalar":
+                                input_ = base[0, 1]
+                                expected = cpu_base[0, 1] * rank_sum
+                            else:
+                                input_ = base
+                                expected = cpu_base * rank_sum
+                            output = torch.full(input_.shape, -1, dtype=dtype,
+                                                device=device)
+                            output_ptr = output.data_ptr()
+                            if wrapper:
+                                result = torch_mpi_ext.ops.all_reduce_out_wrapper(
+                                    output, input_, comm)
+                            else:
+                                result = torch_mpi_ext.ops.all_reduce_out(
+                                    output, input_, self.comm_ptr)
+                            _synchronize_accelerator_if_needed()
+                            self.assertIsNone(result)
+                            self.assertEqual(output.data_ptr(), output_ptr)
+                            torch.testing.assert_close(output.cpu(), expected)
+                            torch.testing.assert_close(
+                                base.cpu(), cpu_base * (self.rank + 1))
+
+    def test_all_reduce_out_rejects_invalid_output(self):
+        """Reject incompatible storage before entering the collective."""
+        comm = torch.tensor([self.comm_ptr], dtype=torch.int64, device="cpu")
+        for device in ("cpu", "mcpu"):
+            input_ = torch.ones((3, 4), device=device)
+            cases = [
+                (torch.empty((2, 4), device=device), input_, "same shape"),
+                (torch.empty((3, 4), dtype=torch.float64, device=device),
+                 input_, "same dtype"),
+                (torch.empty((4, 3), device=device).t(), input_, "contiguous"),
+                (input_, input_, "single memory location"),
+            ]
+            storage = torch.empty(13, device=device)
+            cases.append((storage[1:].view(3, 4), storage[:-1].view(3, 4),
+                          "single memory location"))
+            for wrapper in (False, True):
+                for output, source, error in cases:
+                    with self.subTest(device=device, wrapper=wrapper, error=error):
+                        with self.assertRaisesRegex(RuntimeError, error):
+                            if wrapper:
+                                torch_mpi_ext.ops.all_reduce_out_wrapper(
+                                    output, source, comm)
+                            else:
+                                torch_mpi_ext.ops.all_reduce_out(
+                                    output, source, self.comm_ptr)
+            with self.assertRaisesRegex(RuntimeError, "CPU tensor"):
+                torch_mpi_ext.ops.all_reduce_out_wrapper(
+                    torch.empty_like(input_), input_, comm.to("mcpu"))
+
+    def test_all_reduce_out_contiguous_has_no_copy(self):
+        """Float32 reduction must not implement out via clone + inplace."""
+        input_ = torch.full((3, 4), float(self.rank + 1))
+        output = torch.empty_like(input_)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+            torch_mpi_ext.ops.all_reduce_out(output, input_, self.comm_ptr)
+        events = {event.key for event in prof.key_averages()}
+        self.assertNotIn("aten::clone", events)
+        self.assertNotIn("aten::copy_", events)
+        expected = torch.full_like(output, self.size * (self.size + 1) / 2)
+        torch.testing.assert_close(output, expected)
 
     def test_all_gather_into_tensor_different_dtypes_and_dims(self):
         """Test all_gather with negative dim"""
@@ -800,6 +887,60 @@ class TestMPICompile(TestCase):
                     _synchronize_accelerator_if_needed()
                 
                 self.assertEqual(actual, expected, rtol=1e-3, atol=1e-3)
+
+    def test_compile_all_reduce_out_sliced_input(self):
+        """Dynamic padded input views need no clone or slice-scatter kernels."""
+        from torch._inductor import config, metrics
+        from torch._inductor.utils import run_and_get_code
+
+        comm = torch.tensor([self.comm_ptr], dtype=torch.int64, device="cpu")
+        rank_sum = self.size * (self.size + 1) // 2
+        library = torch_mpi_ext.get_library_path()
+        aoti_env = {
+            "AOTI_EXTRA_CFLAGS": f"-include {torch_mpi_ext.get_include()}/aoti_torch_mpi_ext.h",
+            "AOTI_EXTRA_LDFLAGS": f"-Wl,-rpath,{os.path.dirname(library)} {library}",
+            "TORCHINDUCTOR_DIRECT_DISPATCH_PREFIXES": "torch_mpi_ext",
+        }
+        for device in ("cpu", "mcpu"):
+            for wrapper in (False, True):
+                with self.subTest(device=device, wrapper=wrapper):
+                    def model(buffer, rows, comm_tensor):
+                        input_ = buffer[:rows]
+                        output = torch.empty(input_.shape, dtype=input_.dtype,
+                                             device=input_.device)
+                        if wrapper:
+                            torch_mpi_ext.ops.all_reduce_out_wrapper(
+                                output, input_, comm_tensor)
+                        else:
+                            torch_mpi_ext.ops.all_reduce_out(
+                                output, input_, self.comm_ptr)
+                        return output
+
+                    torch._dynamo.reset()
+                    metrics.reset()
+                    with config.patch(cpp_wrapper=device == "mcpu",
+                                      enable_auto_functionalized_v2=False), \
+                            mock.patch.dict(os.environ, aoti_env):
+                        compiled = torch.compile(model, fullgraph=True, dynamic=True)
+                        for rows in (6, 16, 17, 66):
+                            capacity = (rows + 15) // 16 * 16
+                            buffer = torch.full((capacity, 32), self.rank + 1,
+                                                dtype=torch.bfloat16, device=device)
+                            actual, codes = run_and_get_code(compiled, buffer, rows, comm)
+                            _synchronize_accelerator_if_needed()
+                            expected = torch.full((rows, 32), rank_sum,
+                                                  dtype=torch.bfloat16)
+                            torch.testing.assert_close(actual.cpu(), expected)
+                            torch.testing.assert_close(
+                                buffer.cpu(), torch.full((capacity, 32), self.rank + 1,
+                                                         dtype=torch.bfloat16))
+                            for code in codes:
+                                self.assertNotIn("slice_scatter", code)
+                                self.assertNotIn("aten.clone", code)
+                            if device == "mcpu" and codes:
+                                self.assertIn("aoti_torch_mcpu_all_reduce_out",
+                                              "\n".join(codes))
+                    self.assertEqual(metrics.generated_kernel_count, 0)
 
     def test_compile_all_reduce_inplace(self):
         """Test all_reduce_ with torch.compile"""

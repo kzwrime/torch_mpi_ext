@@ -9,6 +9,8 @@ __all__ = [
     "all_reduce",
     "all_reduce_",
     "all_reduce__wrapper",
+    "all_reduce_out",
+    "all_reduce_out_wrapper",
     "all_reduce_wrapper",
     "alltoall",
     "alltoall_out",
@@ -112,6 +114,25 @@ def all_reduce(input: Tensor, comm_ptr: int) -> Tensor:
         Reduced tensor with same shape as input
     """
     return torch.ops.torch_mpi_ext.all_reduce.default(input, comm_ptr)
+
+
+def all_reduce_out(output: Tensor, input: Tensor, comm_ptr: int) -> None:
+    """Sum input across ranks into caller-owned output, leaving input unchanged.
+
+    Output must be contiguous, have the same shape, dtype and device as input,
+    and not overlap input. Non-contiguous input is packed when needed.
+    Half and bfloat16 inputs accumulate in float32. Returns None.
+    """
+    torch.ops.torch_mpi_ext.all_reduce_out.default(output, input, comm_ptr)
+
+
+def all_reduce_out_wrapper(
+    output: Tensor, input: Tensor, comm_ptr_wrapper: Tensor
+) -> None:
+    """Like all_reduce_out, with a CPU int64[1] MPI communicator handle."""
+    torch.ops.torch_mpi_ext.all_reduce_out_wrapper.default(
+        output, input, comm_ptr_wrapper
+    )
 
 
 def all_reduce__wrapper(input: Tensor, comm_ptr_wrapper: Tensor):
@@ -484,6 +505,33 @@ def _(input: Tensor, comm_ptr):
 def _(input: Tensor, comm_ptr):
     torch._check(isinstance(comm_ptr, int))
     return torch.empty_like(input)
+
+
+def _all_reduce_out_check(output: Tensor, input: Tensor) -> None:
+    torch._check(output.shape == input.shape)
+    torch._check(output.dtype == input.dtype)
+    torch._check(output.device == input.device)
+    torch._check(output.is_contiguous())
+    torch._check(input.dtype in (
+        torch.float16, torch.bfloat16, torch.float32, torch.float64,
+        torch.int8, torch.int16, torch.int32, torch.int64,
+    ))
+    torch._check(input.numel() <= 2**31 - 1)
+
+
+@torch.library.register_fake("torch_mpi_ext::all_reduce_out")
+def _(output: Tensor, input: Tensor, comm_ptr: int) -> None:
+    torch._check(isinstance(comm_ptr, int))
+    _all_reduce_out_check(output, input)
+
+
+@torch.library.register_fake("torch_mpi_ext::all_reduce_out_wrapper")
+def _(output: Tensor, input: Tensor, comm_ptr_wrapper: Tensor) -> None:
+    _all_reduce_out_check(output, input)
+    torch._check(comm_ptr_wrapper.device.type == "cpu")
+    torch._check(comm_ptr_wrapper.ndim == 1)
+    torch._check(comm_ptr_wrapper.size(0) == 1)
+    torch._check(comm_ptr_wrapper.dtype == torch.int64)
 
 
 @torch.library.register_fake("torch_mpi_ext::all_gather_into_tensor_out")

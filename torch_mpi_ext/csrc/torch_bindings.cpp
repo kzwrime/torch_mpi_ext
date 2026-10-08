@@ -32,6 +32,7 @@ TORCH_LIBRARY(torch_mpi_ext, m) {
   m.def("myadd_out(Tensor a, Tensor b, Tensor(a!) out) -> ()");
   m.def("all_reduce_(Tensor(a!) input, int comm_ptr) -> ()");
   m.def("all_reduce(Tensor input, int comm_ptr) -> Tensor");
+  m.def("all_reduce_out(Tensor(a!) output, Tensor input, int comm_ptr) -> ()");
   m.def(
       "all_gather_into_tensor(Tensor input, int comm_ptr, int dim = -1) -> "
       "Tensor");
@@ -57,6 +58,7 @@ TORCH_LIBRARY(torch_mpi_ext, m) {
   m.def("alltoall_out(Tensor(a!) recvbuf, Tensor sendbuf, int comm_ptr) -> ()");
   m.def("all_reduce__wrapper(Tensor(a!) input, Tensor comm_ptr_wrapper) -> ()");
   m.def("all_reduce_wrapper(Tensor input, Tensor comm_ptr_wrapper) -> Tensor");
+  m.def("all_reduce_out_wrapper(Tensor(a!) output, Tensor input, Tensor comm_ptr_wrapper) -> ()");
   m.def(
       "all_gather_into_tensor_wrapper(Tensor input, Tensor comm_ptr_wrapper, int dim = -1) -> "
       "Tensor");
@@ -84,6 +86,7 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, CPU, m) {
   m.impl("myadd_out", &myadd_out_cpu);
   m.impl("all_reduce_", &all_reduce_);
   m.impl("all_reduce", &all_reduce);
+  m.impl("all_reduce_out", &all_reduce_out);
   m.impl("all_gather_into_tensor", &all_gather_into_tensor);
   m.impl("all_gather_into_tensor_out", &all_gather_into_tensor_out);
   m.impl("reduce_scatter", &reduce_scatter);
@@ -95,6 +98,7 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, CPU, m) {
   m.impl("alltoall_out", &alltoall_out);
   m.impl("all_reduce__wrapper", &all_reduce__wrapper);
   m.impl("all_reduce_wrapper", &all_reduce_wrapper);
+  m.impl("all_reduce_out_wrapper", &all_reduce_out_wrapper);
   m.impl("all_gather_into_tensor_wrapper", &all_gather_into_tensor_wrapper);
   m.impl("all_gather_into_tensor_out_wrapper", &all_gather_into_tensor_out_wrapper);
   m.impl("reduce_scatter_wrapper", &reduce_scatter_wrapper);
@@ -109,6 +113,7 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, PrivateUse1, m) {
   m.impl("myadd_out", &myadd_out_cpu);
   m.impl("all_reduce_", &all_reduce_);
   m.impl("all_reduce", &all_reduce);
+  m.impl("all_reduce_out", &all_reduce_out);
   m.impl("all_gather_into_tensor", &all_gather_into_tensor);
   m.impl("all_gather_into_tensor_out", &all_gather_into_tensor_out);
   m.impl("reduce_scatter", &reduce_scatter);
@@ -120,6 +125,7 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, PrivateUse1, m) {
   m.impl("alltoall_out", &alltoall_out);
   m.impl("all_reduce__wrapper", &all_reduce__wrapper);
   m.impl("all_reduce_wrapper", &all_reduce_wrapper);
+  m.impl("all_reduce_out_wrapper", &all_reduce_out_wrapper);
   m.impl("all_gather_into_tensor_wrapper", &all_gather_into_tensor_wrapper);
   m.impl("all_gather_into_tensor_out_wrapper", &all_gather_into_tensor_out_wrapper);
   m.impl("reduce_scatter_wrapper", &reduce_scatter_wrapper);

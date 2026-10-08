@@ -20,6 +20,12 @@ AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_reduce_(
     int64_t comm_ptr,
     [[maybe_unused]] void* output_args);
 
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_reduce_out(
+    AtenTensorHandle output,
+    AtenTensorHandle input,
+    int64_t comm_ptr,
+    [[maybe_unused]] void* output_args);
+
 AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out(
     AtenTensorHandle output,
     AtenTensorHandle input,
@@ -59,6 +65,12 @@ AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_alltoall_out(
     [[maybe_unused]] void* output_args);
 
 AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_reduce__wrapper(
+    AtenTensorHandle input,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args);
+
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_all_reduce_out_wrapper(
+    AtenTensorHandle output,
     AtenTensorHandle input,
     AtenTensorHandle comm_ptr_wrapper,
     [[maybe_unused]] void* output_args);

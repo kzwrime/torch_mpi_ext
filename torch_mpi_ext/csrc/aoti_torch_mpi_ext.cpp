@@ -38,6 +38,20 @@ AOTITorchError aoti_torch_mcpu_all_reduce_(
   });
 }
 
+AOTITorchError aoti_torch_mcpu_all_reduce_out(
+    AtenTensorHandle output,
+    AtenTensorHandle input,
+    int64_t comm_ptr,
+    [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_all_reduce_out", {});
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    all_reduce_out(
+        *tensor_handle_to_tensor_pointer(output),
+        *tensor_handle_to_tensor_pointer(input),
+        comm_ptr);
+  });
+}
+
 AOTITorchError aoti_torch_mcpu_all_gather_into_tensor_out(
     AtenTensorHandle output,
     AtenTensorHandle input,
@@ -131,6 +145,20 @@ AOTITorchError aoti_torch_mcpu_all_reduce__wrapper(
   RECORD_FUNCTION("aoti_torch_mcpu_all_reduce__wrapper", {});
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
     all_reduce__wrapper(
+        *tensor_handle_to_tensor_pointer(input),
+        *tensor_handle_to_tensor_pointer(comm_ptr_wrapper));
+  });
+}
+
+AOTITorchError aoti_torch_mcpu_all_reduce_out_wrapper(
+    AtenTensorHandle output,
+    AtenTensorHandle input,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_all_reduce_out_wrapper", {});
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    all_reduce_out_wrapper(
+        *tensor_handle_to_tensor_pointer(output),
         *tensor_handle_to_tensor_pointer(input),
         *tensor_handle_to_tensor_pointer(comm_ptr_wrapper));
   });

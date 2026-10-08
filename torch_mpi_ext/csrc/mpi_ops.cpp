@@ -1,5 +1,6 @@
 #include <Python.h>
 #include <ATen/Operators.h>
+#include <ATen/MemoryOverlap.h>
 #include <torch/all.h>
 #include <torch/library.h>
 
@@ -270,6 +271,61 @@ void all_reduce_(at::Tensor& input, long comm_ptr) {
       );
       TORCH_CHECK(result == MPI_SUCCESS, "MPI_Allreduce failed");
     }
+  }
+}
+
+namespace {
+
+void all_reduce_out_cpu(at::Tensor& output, const at::Tensor& input,
+                        MPI_Comm comm, int count) {
+  if (input.scalar_type() == at::kHalf ||
+      input.scalar_type() == at::kBFloat16) {
+    at::Tensor buffer = input.to(at::kFloat).contiguous();
+    TORCH_CHECK(MPI_Allreduce(MPI_IN_PLACE, buffer.mutable_data_ptr(), count,
+                             MPI_FLOAT, MPI_SUM, comm) == MPI_SUCCESS,
+                "MPI_Allreduce failed");
+    output.copy_(buffer);
+  } else {
+    const at::Tensor packed_input = input.contiguous();
+    TORCH_CHECK(MPI_Allreduce(packed_input.const_data_ptr(),
+                             output.mutable_data_ptr(), count,
+                             get_mpi_cal_datatype(input), MPI_SUM,
+                             comm) == MPI_SUCCESS,
+                "MPI_Allreduce failed");
+  }
+}
+
+}  // namespace
+
+void all_reduce_out(at::Tensor& output, const at::Tensor& input,
+                     long comm_ptr) {
+  check_same_tensor_layout(output, input);
+  TORCH_CHECK(output.sizes() == input.sizes(),
+              "output must have the same shape as input");
+  at::assert_no_overlap(output, input);
+  // Validate before enqueueing so unsupported dtypes fail on the caller thread.
+  get_mpi_cal_datatype(input);
+  const int count = checked_mpi_count(input.numel(), "all-reduce count");
+  const MPI_Comm comm = MPI_Comm_f2c(static_cast<MPI_Fint>(comm_ptr));
+
+  if (input.device().type() == c10::DeviceType::PrivateUse1) {
+    auto input_spec = make_cpu_view_spec(input);
+    auto output_spec = make_cpu_view_spec(output);
+    at::mcpu::launch_timed_kernel(
+        "mcpu::torch_mpi_ext::all_reduce_out",
+        [input_spec = std::move(input_spec),
+         output_spec = std::move(output_spec), comm,
+         count](at::mcpu::kernel_timing::Event* timing_event) mutable {
+          MCPU_KERNEL_TIMING_SCOPE_EVENT("mcpu::torch_mpi_ext::all_reduce_out",
+                                         timing_event);
+          at::mcpu::KernelPointerMemoryGuard guard(
+              {input_spec.data, output_spec.data});
+          const auto input_view = cpu_view_from_spec(input_spec);
+          auto output_view = cpu_view_from_spec(output_spec);
+          all_reduce_out_cpu(output_view, input_view, comm, count);
+        });
+  } else {
+    all_reduce_out_cpu(output, input, comm, count);
   }
 }
 
@@ -869,6 +925,11 @@ at::Tensor all_reduce_wrapper(const at::Tensor& input,
   long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
 
   return all_reduce(input, comm_ptr);
+}
+
+void all_reduce_out_wrapper(at::Tensor& output, const at::Tensor& input,
+                            const at::Tensor& comm_ptr_wrapper) {
+  all_reduce_out(output, input, get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper));
 }
 
 // Wrapper for all_gather_into_tensor
