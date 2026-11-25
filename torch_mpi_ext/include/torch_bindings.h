@@ -56,3 +56,7 @@ void reduce_scatterv_out_wrapper(at::Tensor& output, const at::Tensor& input,
                                  const at::Tensor& sizes,
                                  const at::Tensor& comm_ptr_wrapper,
                                  int64_t dim);
+void batch_isend_irecv(at::TensorList send_tensors, at::IntArrayRef dst_ranks,
+                       at::IntArrayRef send_tags, at::TensorList recv_tensors,
+                       at::IntArrayRef src_ranks, at::IntArrayRef recv_tags,
+                       const at::Tensor& comm_ptr_wrapper);

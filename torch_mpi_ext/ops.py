@@ -16,6 +16,7 @@ __all__ = [
     "alltoall_out",
     "alltoallv",
     "alltoallv_out",
+    "batch_isend_irecv",
     "myadd_out",
     "mymuladd",
     "reduce_scatter",
@@ -697,3 +698,39 @@ def _fake_alltoall_out(recvbuf: Tensor, sendbuf: Tensor, comm_ptr: int) -> None:
     """FakeTensor kernel for alltoall_out"""
     _alltoall_out_check(recvbuf, sendbuf, comm_ptr)
     # In-place operation returns None
+
+
+def batch_isend_irecv(
+    send_tensors: list[Tensor],
+    dst_ranks: list[int],
+    send_tags: list[int],
+    recv_tensors: list[Tensor],
+    src_ranks: list[int],
+    recv_tags: list[int],
+    comm_ptr_wrapper: Tensor,
+) -> None:
+    """Execute a batch of non-blocking MPI sends and receives on comm_ptr_wrapper."""
+    torch.ops.torch_mpi_ext.batch_isend_irecv.default(
+        send_tensors,
+        dst_ranks,
+        send_tags,
+        recv_tensors,
+        src_ranks,
+        recv_tags,
+        comm_ptr_wrapper,
+    )
+
+
+@torch.library.register_fake("torch_mpi_ext::batch_isend_irecv")
+def _fake_batch_isend_irecv(
+    send_tensors: list[Tensor],
+    dst_ranks: list[int],
+    send_tags: list[int],
+    recv_tensors: list[Tensor],
+    src_ranks: list[int],
+    recv_tags: list[int],
+    comm_ptr_wrapper: Tensor,
+) -> None:
+    _comm_ptr_wrapper_check(comm_ptr_wrapper)
+    torch._check(len(send_tensors) == len(dst_ranks) == len(send_tags))
+    torch._check(len(recv_tensors) == len(src_ranks) == len(recv_tags))

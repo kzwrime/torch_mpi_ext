@@ -109,6 +109,7 @@ AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_reduce_scatterv_out_wrapper(
 // - all_gather_into_tensor_wrapper (torch_bindings.cpp): return type Tensor
 // - reduce_scatter_wrapper (torch_bindings.cpp): return type Tensor
 // - reduce_scatterv_wrapper (torch_bindings.cpp): return type Tensor
+// - batch_isend_irecv (torch_bindings.cpp): argument dst_ranks has type int[]
 
 #ifdef __cplusplus
 } // extern "C"
