@@ -17,8 +17,12 @@ __all__ = [
     "alltoallv",
     "alltoallv_out",
     "batch_isend_irecv",
+    "broadcast",
+    "broadcast_",
     "myadd_out",
     "mymuladd",
+    "recv",
+    "recv_",
     "reduce_scatter",
     "reduce_scatter_out",
     "reduce_scatter_out_wrapper",
@@ -27,6 +31,7 @@ __all__ = [
     "reduce_scatterv_out",
     "reduce_scatterv_out_wrapper",
     "reduce_scatterv_wrapper",
+    "send",
 ]
 
 
@@ -734,3 +739,88 @@ def _fake_batch_isend_irecv(
     _comm_ptr_wrapper_check(comm_ptr_wrapper)
     torch._check(len(send_tensors) == len(dst_ranks) == len(send_tags))
     torch._check(len(recv_tensors) == len(src_ranks) == len(recv_tags))
+
+
+def send(tensor: Tensor, dst: int, tag: int, comm_ptr_wrapper: Tensor) -> None:
+    """Send a contiguous tensor via MPI_Send on comm_ptr_wrapper."""
+    torch.ops.torch_mpi_ext.send.default(tensor, dst, tag, comm_ptr_wrapper)
+
+
+@torch.library.register_fake("torch_mpi_ext::send")
+def _fake_send(
+    tensor: Tensor, dst: int, tag: int, comm_ptr_wrapper: Tensor
+) -> None:
+    _comm_ptr_wrapper_check(comm_ptr_wrapper)
+    torch._check(tensor.is_contiguous())
+    torch._check(dst >= 0)
+    torch._check(tag >= 0)
+
+
+def recv_(tensor: Tensor, src: int, tag: int, comm_ptr_wrapper: Tensor) -> Tensor:
+    """Receive into a pre-allocated contiguous tensor via MPI_Recv on comm_ptr_wrapper."""
+    torch.ops.torch_mpi_ext.recv_.default(tensor, src, tag, comm_ptr_wrapper)
+    return tensor
+
+
+def recv(
+    size: list[int] | tuple[int, ...] | torch.Size,
+    dtype: torch.dtype,
+    src: int,
+    tag: int,
+    comm_ptr_wrapper: Tensor,
+    device: torch.device | str = "cpu",
+) -> Tensor:
+    """Allocate a tensor and receive into it via MPI_Recv on comm_ptr_wrapper."""
+    out = torch.empty(size, dtype=dtype, device=device)
+    torch.ops.torch_mpi_ext.recv_.default(out, src, tag, comm_ptr_wrapper)
+    return out
+
+
+@torch.library.register_fake("torch_mpi_ext::recv_")
+def _fake_recv_(
+    tensor: Tensor, src: int, tag: int, comm_ptr_wrapper: Tensor
+) -> None:
+    _comm_ptr_wrapper_check(comm_ptr_wrapper)
+    torch._check(tensor.is_contiguous())
+    torch._check(src >= 0)
+    torch._check(tag >= 0)
+
+
+def broadcast_(tensor: Tensor, src: int, comm_ptr_wrapper: Tensor) -> Tensor:
+    """In-place MPI_Bcast of a contiguous tensor on comm_ptr_wrapper."""
+    torch.ops.torch_mpi_ext.broadcast_.default(tensor, src, comm_ptr_wrapper)
+    return tensor
+
+
+def broadcast(tensor: Tensor, src: int, comm_ptr_wrapper: Tensor) -> Tensor:
+    """Out-of-place MPI_Bcast returning a broadcasted tensor on comm_ptr_wrapper."""
+    out = tensor.contiguous().clone()
+    torch.ops.torch_mpi_ext.broadcast_.default(out, src, comm_ptr_wrapper)
+    return out
+
+
+@torch.library.register_fake("torch_mpi_ext::broadcast_")
+def _fake_broadcast_(
+    tensor: Tensor, src: int, comm_ptr_wrapper: Tensor
+) -> None:
+    _comm_ptr_wrapper_check(comm_ptr_wrapper)
+    torch._check(tensor.is_contiguous())
+    torch._check(src >= 0)
+
+
+def _register_p2p_collective_effects() -> None:
+    """Prevent FX/AOTAutograd DCE and Inductor reordering of MPI ops."""
+    from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+
+    for op in (
+        torch.ops.torch_mpi_ext.batch_isend_irecv.default,
+        torch.ops.torch_mpi_ext.send.default,
+        torch.ops.torch_mpi_ext.recv_.default,
+        torch.ops.torch_mpi_ext.broadcast_.default,
+    ):
+        torch.fx.node.has_side_effect(op)
+        _register_effectful_op(op, _EffectType.ORDERED)
+
+
+_register_p2p_collective_effects()
+

@@ -97,6 +97,26 @@ AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_reduce_scatterv_out_wrapper(
     int64_t dim,
     [[maybe_unused]] void* output_args);
 
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_send(
+    AtenTensorHandle tensor,
+    int64_t dst,
+    int64_t tag,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args);
+
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_recv_(
+    AtenTensorHandle tensor,
+    int64_t src,
+    int64_t tag,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args);
+
+AOTI_TORCH_EXPORT AOTITorchError aoti_torch_mcpu_broadcast_(
+    AtenTensorHandle tensor,
+    int64_t src,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args);
+
 // Skipped wrappers:
 // - mymuladd (torch_bindings.cpp): return type Tensor
 // - mymul (torch_bindings.cpp): return type Tensor

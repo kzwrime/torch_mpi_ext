@@ -214,4 +214,50 @@ AOTITorchError aoti_torch_mcpu_reduce_scatterv_out_wrapper(
   });
 }
 
+AOTITorchError aoti_torch_mcpu_send(
+    AtenTensorHandle tensor,
+    int64_t dst,
+    int64_t tag,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_send", {});
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    send(
+        *tensor_handle_to_tensor_pointer(tensor),
+        dst,
+        tag,
+        *tensor_handle_to_tensor_pointer(comm_ptr_wrapper));
+  });
+}
+
+AOTITorchError aoti_torch_mcpu_recv_(
+    AtenTensorHandle tensor,
+    int64_t src,
+    int64_t tag,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_recv_", {});
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    recv_(
+        *tensor_handle_to_tensor_pointer(tensor),
+        src,
+        tag,
+        *tensor_handle_to_tensor_pointer(comm_ptr_wrapper));
+  });
+}
+
+AOTITorchError aoti_torch_mcpu_broadcast_(
+    AtenTensorHandle tensor,
+    int64_t src,
+    AtenTensorHandle comm_ptr_wrapper,
+    [[maybe_unused]] void* output_args) {
+  RECORD_FUNCTION("aoti_torch_mcpu_broadcast_", {});
+  AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
+    broadcast_(
+        *tensor_handle_to_tensor_pointer(tensor),
+        src,
+        *tensor_handle_to_tensor_pointer(comm_ptr_wrapper));
+  });
+}
+
 // clang-format on

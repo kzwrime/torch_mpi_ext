@@ -1061,10 +1061,87 @@ void execute_batch_isend_irecv_mpi(const std::vector<P2PTransferSpec>& sends,
     }
   }
 
-  TORCH_CHECK(req_idx == requests.size(), "internal MPI request count mismatch");
+  TORCH_CHECK(req_idx == requests.size(),
+              "internal MPI request count mismatch");
   const int wait_rc = MPI_Waitall(static_cast<int>(requests.size()),
                                   requests.data(), MPI_STATUSES_IGNORE);
   TORCH_CHECK(wait_rc == MPI_SUCCESS, "MPI_Waitall failed with code ", wait_rc);
+}
+
+void resolve_comm_and_tag_ub(const at::Tensor& comm_ptr_wrapper,
+                             MPI_Comm& out_comm, int& out_size,
+                             int& out_tag_ub) {
+  const long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
+  out_comm = MPI_Comm_f2c(static_cast<MPI_Fint>(comm_ptr));
+  TORCH_CHECK(MPI_Comm_size(out_comm, &out_size) == MPI_SUCCESS,
+              "MPI_Comm_size failed");
+  int* tag_ub_ptr = nullptr;
+  int tag_ub_flag = 0;
+  TORCH_CHECK(MPI_Comm_get_attr(out_comm, MPI_TAG_UB, &tag_ub_ptr,
+                                &tag_ub_flag) == MPI_SUCCESS,
+              "MPI_Comm_get_attr(MPI_TAG_UB) failed");
+  out_tag_ub = (tag_ub_flag && tag_ub_ptr != nullptr) ? *tag_ub_ptr : 32767;
+}
+
+void check_p2p_tensor(const at::Tensor& tensor, const char* role) {
+  const auto dev = tensor.device();
+  TORCH_CHECK(dev.type() == c10::DeviceType::CPU ||
+                  dev.type() == c10::DeviceType::PrivateUse1,
+              role, " tensor must reside on CPU or PrivateUse1, got ", dev);
+  TORCH_CHECK(tensor.is_contiguous(), role, " tensor must be contiguous");
+}
+
+void execute_send_mpi(const void* send_ptr, int64_t nbytes, int dst, int tag,
+                      MPI_Comm c_comm) {
+  constexpr int64_t kMaxChunkBytes = int64_t{1} << 30;  // 1 GiB
+  if (nbytes == 0) {
+    uint8_t zero_byte_scratch = 0;
+    const int rc = MPI_Send(&zero_byte_scratch, 0, MPI_BYTE, dst, tag, c_comm);
+    TORCH_CHECK(rc == MPI_SUCCESS, "MPI_Send failed with code ", rc);
+    return;
+  }
+  const auto* base = static_cast<const uint8_t*>(send_ptr);
+  for (int64_t offset = 0; offset < nbytes; offset += kMaxChunkBytes) {
+    const int chunk =
+        static_cast<int>(std::min(kMaxChunkBytes, nbytes - offset));
+    const int rc = MPI_Send(base + offset, chunk, MPI_BYTE, dst, tag, c_comm);
+    TORCH_CHECK(rc == MPI_SUCCESS, "MPI_Send failed with code ", rc);
+  }
+}
+
+void execute_recv_mpi(void* recv_ptr, int64_t nbytes, int src, int tag,
+                      MPI_Comm c_comm) {
+  constexpr int64_t kMaxChunkBytes = int64_t{1} << 30;  // 1 GiB
+  if (nbytes == 0) {
+    uint8_t zero_byte_scratch = 0;
+    const int rc = MPI_Recv(&zero_byte_scratch, 0, MPI_BYTE, src, tag, c_comm,
+                            MPI_STATUS_IGNORE);
+    TORCH_CHECK(rc == MPI_SUCCESS, "MPI_Recv failed with code ", rc);
+    return;
+  }
+  auto* base = static_cast<uint8_t*>(recv_ptr);
+  for (int64_t offset = 0; offset < nbytes; offset += kMaxChunkBytes) {
+    const int chunk =
+        static_cast<int>(std::min(kMaxChunkBytes, nbytes - offset));
+    const int rc = MPI_Recv(base + offset, chunk, MPI_BYTE, src, tag, c_comm,
+                            MPI_STATUS_IGNORE);
+    TORCH_CHECK(rc == MPI_SUCCESS, "MPI_Recv failed with code ", rc);
+  }
+}
+
+void execute_broadcast_mpi(void* data_ptr, int64_t nbytes, int src,
+                           MPI_Comm c_comm) {
+  if (nbytes == 0) {
+    return;
+  }
+  constexpr int64_t kMaxChunkBytes = int64_t{1} << 30;  // 1 GiB
+  auto* base = static_cast<uint8_t*>(data_ptr);
+  for (int64_t offset = 0; offset < nbytes; offset += kMaxChunkBytes) {
+    const int chunk =
+        static_cast<int>(std::min(kMaxChunkBytes, nbytes - offset));
+    const int rc = MPI_Bcast(base + offset, chunk, MPI_BYTE, src, c_comm);
+    TORCH_CHECK(rc == MPI_SUCCESS, "MPI_Bcast failed with code ", rc);
+  }
 }
 
 }  // namespace
@@ -1073,44 +1150,36 @@ void batch_isend_irecv(at::TensorList send_tensors, at::IntArrayRef dst_ranks,
                        at::IntArrayRef send_tags, at::TensorList recv_tensors,
                        at::IntArrayRef src_ranks, at::IntArrayRef recv_tags,
                        const at::Tensor& comm_ptr_wrapper) {
-  TORCH_CHECK(send_tensors.size() == dst_ranks.size() &&
-                  send_tensors.size() == send_tags.size(),
-              "send_tensors, dst_ranks, and send_tags must have the same length");
-  TORCH_CHECK(recv_tensors.size() == src_ranks.size() &&
-                  recv_tensors.size() == recv_tags.size(),
-              "recv_tensors, src_ranks, and recv_tags must have the same length");
+  TORCH_CHECK(
+      send_tensors.size() == dst_ranks.size() &&
+          send_tensors.size() == send_tags.size(),
+      "send_tensors, dst_ranks, and send_tags must have the same length");
+  TORCH_CHECK(
+      recv_tensors.size() == src_ranks.size() &&
+          recv_tensors.size() == recv_tags.size(),
+      "recv_tensors, src_ranks, and recv_tags must have the same length");
 
-  const long comm_ptr = get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
   if (send_tensors.empty() && recv_tensors.empty()) {
+    get_comm_ptr_from_cpu_wrapper(comm_ptr_wrapper);
     return;
   }
 
-  MPI_Comm c_comm = MPI_Comm_f2c(static_cast<MPI_Fint>(comm_ptr));
+  MPI_Comm c_comm = MPI_COMM_NULL;
   int comm_size = 0;
-  TORCH_CHECK(MPI_Comm_size(c_comm, &comm_size) == MPI_SUCCESS,
-              "MPI_Comm_size failed");
-  int* tag_ub_ptr = nullptr;
-  int tag_ub_flag = 0;
-  TORCH_CHECK(
-      MPI_Comm_get_attr(c_comm, MPI_TAG_UB, &tag_ub_ptr, &tag_ub_flag) ==
-          MPI_SUCCESS,
-      "MPI_Comm_get_attr(MPI_TAG_UB) failed");
-  const int tag_ub =
-      (tag_ub_flag && tag_ub_ptr != nullptr) ? *tag_ub_ptr : 32767;
+  int tag_ub = 0;
+  resolve_comm_and_tag_ub(comm_ptr_wrapper, c_comm, comm_size, tag_ub);
 
   std::optional<c10::Device> common_device;
   auto check_and_record_device = [&](const at::Tensor& t, const char* role) {
+    check_p2p_tensor(t, role);
     const auto dev = t.device();
-    TORCH_CHECK(dev.type() == c10::DeviceType::CPU ||
-                    dev.type() == c10::DeviceType::PrivateUse1,
-                role, " tensors must reside on CPU or PrivateUse1, got ", dev);
-    TORCH_CHECK(t.is_contiguous(), role, " tensors must be contiguous");
     if (!common_device.has_value()) {
       common_device = dev;
     } else {
-      TORCH_CHECK(dev == *common_device,
-                  "all send and recv tensors must be on the same device: expected ",
-                  *common_device, ", got ", dev);
+      TORCH_CHECK(
+          dev == *common_device,
+          "all send and recv tensors must be on the same device: expected ",
+          *common_device, ", got ", dev);
     }
   };
 
@@ -1149,7 +1218,8 @@ void batch_isend_irecv(at::TensorList send_tensors, at::IntArrayRef dst_ranks,
     TORCH_CHECK(tag >= 0 && tag <= tag_ub, "invalid MPI recv tag ", tag,
                 " (valid [0, ", tag_ub, "])");
     const int64_t nbytes = t.numel() * static_cast<int64_t>(t.element_size());
-    void* ptr = nbytes > 0 ? const_cast<at::Tensor&>(t).mutable_data_ptr() : nullptr;
+    void* ptr =
+        nbytes > 0 ? const_cast<at::Tensor&>(t).mutable_data_ptr() : nullptr;
     if (ptr != nullptr) {
       guard_ptrs.push_back(ptr);
     }
@@ -1175,8 +1245,8 @@ void batch_isend_irecv(at::TensorList send_tensors, at::IntArrayRef dst_ranks,
             at::mcpu::kernel_timing::Event* timing_event) mutable {
           MCPU_KERNEL_TIMING_SCOPE_EVENT(
               "mcpu::torch_mpi_ext::batch_isend_irecv", timing_event);
-          at::mcpu::KernelPointerMemoryGuard guard(
-              c10::ArrayRef<const void*>(guard_ptrs));
+          at::mcpu::KernelPointerMemoryGuard guard{
+              c10::ArrayRef<const void*>(guard_ptrs)};
           execute_batch_isend_irecv_mpi(sends, recvs, c_comm);
         };
     at::mcpu::launch_timed_kernel_on_stream(
@@ -1186,4 +1256,127 @@ void batch_isend_irecv(at::TensorList send_tensors, at::IntArrayRef dst_ranks,
   }
 
   execute_batch_isend_irecv_mpi(sends, recvs, c_comm);
+}
+
+void send(const at::Tensor& tensor, int64_t dst, int64_t tag,
+          const at::Tensor& comm_ptr_wrapper) {
+  check_p2p_tensor(tensor, "send");
+  MPI_Comm c_comm = MPI_COMM_NULL;
+  int comm_size = 0;
+  int tag_ub = 0;
+  resolve_comm_and_tag_ub(comm_ptr_wrapper, c_comm, comm_size, tag_ub);
+  TORCH_CHECK(dst >= 0 && dst < comm_size, "invalid dst rank ", dst,
+              " for comm_size ", comm_size);
+  TORCH_CHECK(tag >= 0 && tag <= tag_ub, "invalid MPI send tag ", tag,
+              " (valid [0, ", tag_ub, "])");
+
+  const int64_t nbytes =
+      tensor.numel() * static_cast<int64_t>(tensor.element_size());
+  const void* send_ptr = nbytes > 0 ? tensor.const_data_ptr() : nullptr;
+
+  if (tensor.device().type() == c10::DeviceType::PrivateUse1) {
+    auto stream = c10::mcpu::getCurrentMcpuStream(tensor.device().index());
+    if (nbytes > 0) {
+      record_stream_if_cross_stream(tensor, stream);
+    }
+    auto run_private =
+        [send_ptr, nbytes, dst = static_cast<int>(dst),
+         tag = static_cast<int>(tag),
+         c_comm](at::mcpu::kernel_timing::Event* timing_event) mutable {
+          MCPU_KERNEL_TIMING_SCOPE_EVENT("mcpu::torch_mpi_ext::send",
+                                         timing_event);
+          if (send_ptr != nullptr) {
+            at::mcpu::KernelPointerMemoryGuard guard({send_ptr});
+            execute_send_mpi(send_ptr, nbytes, dst, tag, c_comm);
+          } else {
+            execute_send_mpi(nullptr, 0, dst, tag, c_comm);
+          }
+        };
+    at::mcpu::launch_timed_kernel_on_stream(stream, "mcpu::torch_mpi_ext::send",
+                                            std::move(run_private));
+    return;
+  }
+
+  execute_send_mpi(send_ptr, nbytes, static_cast<int>(dst),
+                   static_cast<int>(tag), c_comm);
+}
+
+void recv_(at::Tensor& tensor, int64_t src, int64_t tag,
+           const at::Tensor& comm_ptr_wrapper) {
+  check_p2p_tensor(tensor, "recv");
+  MPI_Comm c_comm = MPI_COMM_NULL;
+  int comm_size = 0;
+  int tag_ub = 0;
+  resolve_comm_and_tag_ub(comm_ptr_wrapper, c_comm, comm_size, tag_ub);
+  TORCH_CHECK(src >= 0 && src < comm_size, "invalid src rank ", src,
+              " for comm_size ", comm_size);
+  TORCH_CHECK(tag >= 0 && tag <= tag_ub, "invalid MPI recv tag ", tag,
+              " (valid [0, ", tag_ub, "])");
+
+  const int64_t nbytes =
+      tensor.numel() * static_cast<int64_t>(tensor.element_size());
+  void* recv_ptr = nbytes > 0 ? tensor.mutable_data_ptr() : nullptr;
+
+  if (tensor.device().type() == c10::DeviceType::PrivateUse1) {
+    auto stream = c10::mcpu::getCurrentMcpuStream(tensor.device().index());
+    if (nbytes > 0) {
+      record_stream_if_cross_stream(tensor, stream);
+    }
+    auto run_private =
+        [recv_ptr, nbytes, src = static_cast<int>(src),
+         tag = static_cast<int>(tag),
+         c_comm](at::mcpu::kernel_timing::Event* timing_event) mutable {
+          MCPU_KERNEL_TIMING_SCOPE_EVENT("mcpu::torch_mpi_ext::recv",
+                                         timing_event);
+          if (recv_ptr != nullptr) {
+            at::mcpu::KernelPointerMemoryGuard guard({recv_ptr});
+            execute_recv_mpi(recv_ptr, nbytes, src, tag, c_comm);
+          } else {
+            execute_recv_mpi(nullptr, 0, src, tag, c_comm);
+          }
+        };
+    at::mcpu::launch_timed_kernel_on_stream(stream, "mcpu::torch_mpi_ext::recv",
+                                            std::move(run_private));
+    return;
+  }
+
+  execute_recv_mpi(recv_ptr, nbytes, static_cast<int>(src),
+                   static_cast<int>(tag), c_comm);
+}
+
+void broadcast_(at::Tensor& tensor, int64_t src,
+                const at::Tensor& comm_ptr_wrapper) {
+  check_p2p_tensor(tensor, "broadcast");
+  MPI_Comm c_comm = MPI_COMM_NULL;
+  int comm_size = 0;
+  int tag_ub = 0;
+  resolve_comm_and_tag_ub(comm_ptr_wrapper, c_comm, comm_size, tag_ub);
+  TORCH_CHECK(src >= 0 && src < comm_size, "invalid src rank ", src,
+              " for comm_size ", comm_size);
+
+  const int64_t nbytes =
+      tensor.numel() * static_cast<int64_t>(tensor.element_size());
+  void* data_ptr = nbytes > 0 ? tensor.mutable_data_ptr() : nullptr;
+
+  if (tensor.device().type() == c10::DeviceType::PrivateUse1) {
+    auto stream = c10::mcpu::getCurrentMcpuStream(tensor.device().index());
+    if (nbytes > 0) {
+      record_stream_if_cross_stream(tensor, stream);
+    }
+    auto run_private =
+        [data_ptr, nbytes, src = static_cast<int>(src),
+         c_comm](at::mcpu::kernel_timing::Event* timing_event) mutable {
+          MCPU_KERNEL_TIMING_SCOPE_EVENT("mcpu::torch_mpi_ext::broadcast",
+                                         timing_event);
+          if (data_ptr != nullptr) {
+            at::mcpu::KernelPointerMemoryGuard guard({data_ptr});
+            execute_broadcast_mpi(data_ptr, nbytes, src, c_comm);
+          }
+        };
+    at::mcpu::launch_timed_kernel_on_stream(
+        stream, "mcpu::torch_mpi_ext::broadcast", std::move(run_private));
+    return;
+  }
+
+  execute_broadcast_mpi(data_ptr, nbytes, static_cast<int>(src), c_comm);
 }

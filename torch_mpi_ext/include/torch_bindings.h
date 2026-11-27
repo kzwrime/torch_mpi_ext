@@ -60,3 +60,9 @@ void batch_isend_irecv(at::TensorList send_tensors, at::IntArrayRef dst_ranks,
                        at::IntArrayRef send_tags, at::TensorList recv_tensors,
                        at::IntArrayRef src_ranks, at::IntArrayRef recv_tags,
                        const at::Tensor& comm_ptr_wrapper);
+void send(const at::Tensor& tensor, int64_t dst, int64_t tag,
+          const at::Tensor& comm_ptr_wrapper);
+void recv_(at::Tensor& tensor, int64_t src, int64_t tag,
+           const at::Tensor& comm_ptr_wrapper);
+void broadcast_(at::Tensor& tensor, int64_t src,
+                const at::Tensor& comm_ptr_wrapper);

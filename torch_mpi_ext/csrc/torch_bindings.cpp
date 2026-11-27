@@ -81,6 +81,13 @@ TORCH_LIBRARY(torch_mpi_ext, m) {
       "batch_isend_irecv(Tensor[] send_tensors, int[] dst_ranks, int[] "
       "send_tags, Tensor(a!)[] recv_tensors, int[] src_ranks, int[] "
       "recv_tags, Tensor comm_ptr_wrapper) -> ()");
+  m.def("send(Tensor tensor, int dst, int tag, Tensor comm_ptr_wrapper) -> ()");
+  m.def(
+      "recv_(Tensor(a!) tensor, int src, int tag, Tensor comm_ptr_wrapper) -> "
+      "()");
+  m.def(
+      "broadcast_(Tensor(a!) tensor, int src, Tensor comm_ptr_wrapper) -> "
+      "()");
 }
 
 // Registers CPU implementations for mymuladd, mymul, myadd_out
@@ -110,6 +117,9 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, CPU, m) {
   m.impl("reduce_scatterv_wrapper", &reduce_scatterv_wrapper);
   m.impl("reduce_scatterv_out_wrapper", &reduce_scatterv_out_wrapper);
   m.impl("batch_isend_irecv", &batch_isend_irecv);
+  m.impl("send", &send);
+  m.impl("recv_", &recv_);
+  m.impl("broadcast_", &broadcast_);
 }
 
 TORCH_LIBRARY_IMPL(torch_mpi_ext, PrivateUse1, m) {
@@ -138,6 +148,9 @@ TORCH_LIBRARY_IMPL(torch_mpi_ext, PrivateUse1, m) {
   m.impl("reduce_scatterv_wrapper", &reduce_scatterv_wrapper);
   m.impl("reduce_scatterv_out_wrapper", &reduce_scatterv_out_wrapper);
   m.impl("batch_isend_irecv", &batch_isend_irecv);
+  m.impl("send", &send);
+  m.impl("recv_", &recv_);
+  m.impl("broadcast_", &broadcast_);
 }
 
 }  // namespace torch_mpi_ext
